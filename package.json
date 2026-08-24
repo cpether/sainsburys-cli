@@ -1,5 +1,5 @@
 {
-  "name": "@amar/sainsburys-cli",
+  "name": "sainsburys-cli",
   "version": "0.1.0",
   "type": "module",
   "description": "Agent-friendly CLI for Sainsbury's Groceries Online — baskets, orders, slots, checkout",

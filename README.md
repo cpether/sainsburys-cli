@@ -7,7 +7,7 @@ Build baskets, amend live orders, book delivery slots, apply coupons, and place 
 ## Install
 
 ```sh
-npm install -g @amar/sainsburys-cli
+npm install -g sainsburys-cli
 ```
 
 Postinstall downloads Chromium via Playwright. Login works best with system Chrome installed (the browser launches with `channel: "chrome"` to pass bot detection).
