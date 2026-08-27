@@ -51,5 +51,5 @@ Still uncaptured / not wired up:
 - Sainsbury's ToS prohibits automated access. Personal use at own-account risk.
 
 ## Working notes
-- All identifiers are numeric (orderIds 10 digits, product SKUs 4-7 digits, store_number 4 digits zero-padded, e.g. `2168` = home store).
+- All identifiers are numeric (orderIds 10 digits, product SKUs 4-7 digits, store_number 4 digits zero-padded, e.g. `2168` = the generic pre-slot default).
 - `pick_time`, `store_number`, `slot_booked` query params are required on most basket/product calls — they gate availability/pricing.

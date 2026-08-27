@@ -68,7 +68,7 @@ export async function searchProducts(
       page_number: args.pageNumber ?? 1,
       sort_order: "FAVOURITES_FIRST",
       store_identifier: args.ctx.storeIdentifier,
-      flexi_stores: args.ctx.flexiStores?.join(",") ?? "2168",
+      flexi_stores: args.ctx.flexiStores?.join(",") ?? undefined,
       region: "England",
       salesWindow: 1,
       citrus_max_number_ads: 0,

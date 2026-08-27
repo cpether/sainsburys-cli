@@ -199,7 +199,7 @@ Base: `https://www.sainsburys.co.uk/groceries-api/gol-services`. All authenticat
 **`GET /basket/v2/basket`**
 Query params (all observed):
 - `pick_time` — ISO-8601, used to gate availability and pricing (e.g. `2026-04-07T00:00:00Z`). When no slot is booked: looks like the SPA passes "now" rounded.
-- `store_number` — 4-digit store id (`2168` for the user's home store, `2168` shows up as a pre-slot default).
+- `store_number` — 4-digit store id (`2168` shows up as a pre-slot default).
 - `slot_booked` — `true|false`.
 - `calculate=true` — recompute totals/promotions.
 
@@ -563,7 +563,7 @@ Returns 200 with empty body. To change the slot on a *placed* order, you must fi
 | `order_uid` / `basket_id` / `order_id` | `1280000001`, `1280000002`, `1280000003`, `1280000004` | numeric 10 digits. Basket and order share the id space — basket is a draft order. |
 | `address_uid` | `100000001` | numeric 9 digits |
 | `card_uid` | `6` | small integer (per-customer index) |
-| `store_identifier` / `store_number` | `2168`, `2168`, `2168` (default-pre-slot) | 4-digit zero-padded |
+| `store_identifier` / `store_number` | `2168` (default-pre-slot) | 4-digit zero-padded |
 | `delivery_pass_id` | `12017` | numeric 5 digits |
 | `slot.reservation_id` | `22222222-2222-4222-8222-222222222222` | UUID |
 | `slot.booking_key` | `b64opaque...` (210 chars) | opaque base64; required to commit a slot |

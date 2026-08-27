@@ -42,6 +42,6 @@ export function inferStoreNumber(client: GroceriesClient, override?: string): st
   if (override) return override;
   const fromSession = client.getSession().storeNumber;
   if (fromSession) return fromSession;
-  // Fallback: well-known default observed in HARs.
+  // Fallback: Sainsbury's own generic pre-slot default (not user-specific).
   return "2168";
 }
