@@ -21,7 +21,10 @@ export function parseReservation(value: unknown): SlotReservation | null {
   if (value === undefined || value === null || value === "") return null;
   const r = record(value);
   const reservation_type = string(r.reservation_type);
-  const is_expired = boolean(r.is_expired);
+  // An unslotted account still returns store/region context, but may omit
+  // expiry entirely. A returned slot must carry an explicit boolean flag.
+  const hasSlot = r.slot !== undefined && r.slot !== null;
+  const is_expired = r.is_expired === undefined && !hasSlot ? undefined : boolean(r.is_expired);
   if (r.store_identifier !== undefined) r.store_identifier = identifier(r.store_identifier);
   if (r.region !== undefined) string(r.region);
   if (r.flexi_stores !== undefined && (!Array.isArray(r.flexi_stores) || !r.flexi_stores.every(x => typeof x === "string" && /^\d{4}$/.test(x)))) throw new ValidationError("Invalid flexi stores");

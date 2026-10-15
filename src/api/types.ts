@@ -102,7 +102,8 @@ export interface Order extends OrderListItem {
 }
 
 export interface SlotReservation {
-  is_expired: boolean;
+  /** May be absent only when there is no slot. */
+  is_expired?: boolean;
   reservation_type: string;
   reserved_until?: string;
   postcode?: string;

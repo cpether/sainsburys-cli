@@ -1,6 +1,8 @@
 # Supervised live validation
 
-Status: pending successful CLI login and verified reads. The first user-supervised attempt reached the account/trolley page, then closed with a generic terminal failure. A retry with stage diagnostics captured authenticated credentials, then failed before a usable verification response reached the validator. Claude independently reproduced a response-adapter failure with multiple Set-Cookie headers using real Playwright HTTP and a dummy loopback server. That defect and the export of cookies refreshed by verification are fixed with regression coverage. It is a strong candidate for the live cause, awaiting retry. The assistant has made no live retailer requests or basket changes. Offline tests establish local behavior only.
+Status on 15 October 2026: user-performed local login and account identity verification passed. Fresh CLI processes then successfully read the cached identity, account-derived context, current reservation, active order state, oats search, candidate product details and basket. The reads reported an empty basket, amend mode off, no active order and no booked slot. No basket mutation, amendment, slot change, checkout or payment has been performed. Website comparison, the approved reversible mutation sequence and natural session expiry remain pending.
+
+The earlier generic login failure was followed by a verification failure. Claude independently reproduced an adapter bug with multiple Set-Cookie headers using real Playwright HTTP and a dummy loopback server. The fixed adapter and refreshed-cookie export were followed by successful live login and cached reads. The unslotted reservation also omitted `is_expired`; the parser now accepts that observed form while requiring an explicit expiry flag whenever a slot is present. Synthetic regression fixtures preserve the field layout without account values. No real session, HAR or raw profile response is checked in.
 
 ## Login and reads
 

@@ -9,7 +9,22 @@ import { getProductsByUid } from "../src/api/product.js";
 import { fakeSession, makeFakeFetch } from "./_helpers.js";
 const future = "2099-10-15T10:00:00Z";
 const reservation={is_expired:false,reservation_type:"delivery",store_identifier:"0123",region:"Scotland",flexi_stores:["0123"],reserved_until:future,slot:{start_time:future,end_time:"2099-10-15T11:00:00Z",price:1,booking_key:"dummy",reservation_id:"reservation-1",slot_type:"1hour"}};
+// Synthetic values with the field layout observed in the supervised unslotted read.
+const unslotted={reservation_type:"none",postcode:"ZZ1 1ZZ",store_identifier:"0123",region:"Test region",flexi_stores:["0123"],is_alcohol_restricted_store:false};
 function client(bodies: unknown[]){const f=makeFakeFetch(bodies.map(body=>({body})));return {client:new GroceriesClient({session:fakeSession(),baseUrl:"https://www.sainsburys.co.uk",fetchImpl:f.fetch}),calls:f.calls};}
+for(const slot of [undefined,null])test(`unslotted account context keeps its store without an expiry flag (${slot})`,async()=>{
+  const c=client([{user_id:"123456789"},{...unslotted,...(slot===null?{slot:null}:{})}]);
+  const ctx=await resolveShoppingContext(c.client);
+  assert.deepEqual(ctx.basketContext,{storeNumber:"0123",slotBooked:false});
+  assert.equal(ctx.source,"reservation");
+  assert.equal(ctx.reservationId,null);
+  assert.deepEqual(ctx.productContext,{storeIdentifier:"0123",region:"Test region",flexiStores:["0123"]});
+});
+test("booked-slot context still requires an explicit boolean expiry flag",async()=>{
+  for(const body of [{...unslotted,slot:reservation.slot},{...unslotted,is_expired:"false"}]){
+    const c=client([body]);await assert.rejects(getSlotReservation(c.client));
+  }
+});
 test("actual reservation overrides cached store and carries delivery context",async()=>{
   const c=client([{user_id:123456789,store_number:"9999"},reservation]);
   const ctx=await resolveShoppingContext(c.client);

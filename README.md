@@ -2,7 +2,7 @@
 
 This fork starts at audited source commit `dde7355e8b52aa64583f3ab0516fbcf35f3c45b6` of [yousefamar/sainsburys-cli](https://github.com/yousefamar/sainsburys-cli). It keeps its browser authentication capture and retailer request shapes, with a smaller CLI for searching, reviewing and verifying basket changes. You review and pay on [Sainsbury's website](https://www.sainsburys.co.uk/gol-ui/trolley).
 
-Payment, existing-order amendments and slot booking have no supported command or shipped implementation. Basket writes reject amend mode. MFA is manual. Live compatibility with your account remains pending until the supervised sequence in [LIVE_VALIDATION.md](LIVE_VALIDATION.md) passes.
+Payment, existing-order amendments and slot booking have no supported command or shipped implementation. Basket writes reject amend mode. MFA is manual. Supervised live login and cached reads have passed. Website comparison, approved basket writes/restoration and natural session expiry checks remain pending in [LIVE_VALIDATION.md](LIVE_VALIDATION.md).
 
 ## Setup
 

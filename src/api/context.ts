@@ -18,7 +18,7 @@ export async function resolveShoppingContext(client: GroceriesClient, override?:
   if ((typeof store !== "string" && typeof store !== "number") || !/^\d{4}$/.test(String(store))) {
     throw new ValidationError("Store is unknown; compare the website and provide --store or SAINSBURYS_STORE_NUMBER");
   }
-  const active = !!reservation?.slot && !reservation.is_expired && Date.parse(reservation.slot.end_time) > Date.now() &&
+  const active = !!reservation?.slot && reservation.is_expired === false && Date.parse(reservation.slot.end_time) > Date.now() &&
     (!reservation.reserved_until || Date.parse(reservation.reserved_until) > Date.now());
   const pickTime = active ? reservation!.slot!.start_time : undefined;
   const type = reservation?.reservation_type.toLowerCase();
