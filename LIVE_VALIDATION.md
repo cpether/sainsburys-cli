@@ -1,6 +1,6 @@
 # Supervised live validation
 
-Status on 15 October 2026: early HTTP pilots and the first resident-browser pilots reproduced successful last-item removal followed by HTTP 500 on basket readback and later authentication rejection. The original empty basket was restored and verified through fresh API reads and the website. No purchase, amendment or slot change occurred.
+Status on 15 October 2026: early HTTP pilots failed immediate verification after writes. Status-only diagnosis and the first resident pilots then reproduced last-item removal followed by basket HTTP 500 and later authentication rejection. The original empty basket was restored and verified through fresh API reads and the website. No purchase, amendment or slot change occurred.
 
 The account holder completed one sign-in for the resident-browser validation below. Subsequent minimized profile resumes required no additional human sign-in. A bounded diagnostic then verified removal successfully by replacing only the page inside the same browser after basket GET 500, re-verifying identity and repeating the read. The mutation was never repeated. Production regression tests and the full normal-service pilot of that recovery passed. Every mutation was verified, the website matched quantities and totals, and a fresh CLI process confirmed restoration. Longer session lifetime and natural expiry remain unverified.
 
@@ -80,6 +80,8 @@ The diagnostic wrapper was stopped. The production implementation started throug
 | Fresh identity/context/order/search reads | Expected identity; unchanged context; no active order; 30 search results | No slot/order change was made |
 
 The resident process identity remained unchanged through removal and restoration. Its status remained running and authenticated. No explicit login, browser-process restart or mutation retry occurred during this final sequence. The dedicated browser remains running for subsequent shopping. This establishes the bounded ordinary-item workflow for this account at this time; it does not prove indefinite login, natural expiry, booked-slot pricing or weighted-product compatibility.
+
+More than five minutes after restoration, new CLI processes again confirmed the expected identity, unchanged context, no active order and the original empty basket. The same resident process remained running and authenticated, with no further sign-in. This is short-term reuse evidence, not a natural-expiry test.
 
 Final local checks passed typecheck, build, all 273 automated tests and dependency audit with zero vulnerabilities. The independent fresh-page reviewer separately passed 78 engine/IPC/CLI tests and found no material blocker. Final Claude review and CI are required before merge; their results are recorded on PR6.
 
