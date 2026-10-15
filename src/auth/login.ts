@@ -71,9 +71,13 @@ async function captureLogin(opts: LoginOptions, email: string, log: (msg: string
   const unregister = registerCleanup(close);
   let timer: ReturnType<typeof setTimeout> | undefined;
   let stage = "opening the browser page";
+  let verificationFailure: string | undefined;
   try {
     throwIfInterrupted();
     const page = await context.newPage();
+    // Read browser metadata on about:blank, before login redirects can destroy
+    // the execution context. Credential capture need not wait for document load.
+    const userAgent = await page.evaluate(() => navigator.userAgent);
     let wcauthtoken: string | undefined;
     let bearerToken: string | undefined;
     let resolveTokens!: () => void;
@@ -135,18 +139,38 @@ async function captureLogin(opts: LoginOptions, email: string, log: (msg: string
         cookies: sessionCookies, wcauthtoken, bearerToken,
         userId: parseWcauthtoken(wcauthtoken).userId,
         capturedAt: Date.now(),
-        userAgent: await page.evaluate(() => navigator.userAgent),
+        userAgent,
       };
       // Perform an authenticated read using browser transport. This verifies the account
       // before exporting credentials or accepting an already-authenticated profile.
       const client = new GroceriesClient({
         session, baseUrl: ORIGIN,
         fetchImpl: async (input, init) => {
-          const result = await context.request.get(String(input), {
-            headers: Object.fromEntries(new Headers(init?.headers).entries()),
-            maxRedirects: 0, timeout: 15_000,
-          });
-          return new Response(await result.body(), { status: result.status(), headers: result.headers() });
+          let result;
+          try {
+            result = await context.request.get(String(input), {
+              headers: Object.fromEntries(new Headers(init?.headers).entries()),
+              maxRedirects: 0, timeout: 15_000,
+            });
+          } catch (error) {
+            // The shared client intentionally masks raw fetch errors. Preserve
+            // only a fixed category before it does so, never the browser call log.
+            verificationFailure = browserTransportFailure(error);
+            throw new Error("Browser verification transport failed.");
+          }
+          let body;
+          try { body = await result.body(); }
+          catch {
+            verificationFailure = "browser verification response could not be read";
+            throw new Error("Browser verification response failed.");
+          }
+          try {
+            const status = result.status();
+            return new Response([204, 205, 304].includes(status) ? null : body, { status, headers: result.headers() });
+          } catch {
+            verificationFailure = "browser verification response could not be adapted";
+            throw new Error("Browser verification response failed.");
+          }
         },
       });
       stage = "account verification";
@@ -170,7 +194,7 @@ async function captureLogin(opts: LoginOptions, email: string, log: (msg: string
     if (stage === "account verification") {
       if (err instanceof AuthError) detail = `failed during account verification: retailer rejected the read (HTTP ${err.status})`;
       else if (err instanceof ResponseValidationError) detail = `failed during account verification: ${err.message}`;
-      else if (err instanceof ApiError) detail = `failed during account verification: ${err.status ? `HTTP ${err.status}` : "network or browser transport failure"}`;
+      else if (err instanceof ApiError) detail = `failed during account verification: ${err.status ? `HTTP ${err.status}` : verificationFailure ?? "network or browser transport failure"}`;
       else if (err instanceof RequestTimeoutError) detail = "failed during account verification: the read exceeded its 15-second deadline";
     }
     throw new LocalLoginError(`Local browser login ${detail}. Session credentials were not saved. Retry auth login; share only this sanitized error if it fails again.`);
@@ -183,6 +207,24 @@ async function captureLogin(opts: LoginOptions, email: string, log: (msg: string
       });
     } finally { unregister(); }
   }
+}
+
+/** Inspect only the failure summary, excluding Playwright's token-bearing call log. */
+function browserTransportFailure(error: unknown): string {
+  if (error instanceof errors.TimeoutError) return "browser verification request timed out";
+  const summary = error instanceof Error ? error.message.split(/\r?\n/, 1)[0] ?? "" : "";
+  const categories: Array<[RegExp, string]> = [
+    [/ECONNRESET|socket hang up|connection reset|ERR_CONNECTION_RESET/i, "connection reset before a response"],
+    [/certificate|CERT_HAS_EXPIRED|UNABLE_TO_VERIFY_LEAF_SIGNATURE|ERR_TLS_CERT_ALTNAME_INVALID/i, "TLS certificate verification failed; check local network trust and Node certificate configuration"],
+    [/ENOTFOUND|EAI_AGAIN/i, "DNS lookup failed"],
+    [/ECONNREFUSED/i, "connection refused"],
+    [/ETIMEDOUT|timed out/i, "browser verification request timed out"],
+    [/ENETUNREACH|EHOSTUNREACH/i, "network unreachable"],
+    [/ERR_INVALID_CHAR|Invalid character in header/i, "browser verification request headers were rejected locally"],
+    [/ERR_HTTP2_PROTOCOL_ERROR|HPE_[A-Z_]+/i, "HTTP protocol failure"],
+    [/Target .* has been closed/i, "login browser closed during account verification"],
+  ];
+  return categories.find(([pattern]) => pattern.test(summary))?.[1] ?? "browser verification request failed (unclassified transport error)";
 }
 
 function identityProfile(value: unknown): { user_id: string | number; email: string } {

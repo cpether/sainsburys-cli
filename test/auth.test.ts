@@ -112,6 +112,19 @@ describe("private authentication storage", () => {
 });
 
 describe("manual local login", () => {
+  it("reads browser metadata before the login redirect can replace its execution context", () => temporary(async (dir) => {
+    const fake = fakeBrowser();
+    const goto = fake.page.goto;
+    let navigating = false;
+    fake.page.goto = async () => { navigating = true; await goto(); };
+    fake.page.evaluate = async () => {
+      assert.equal(navigating, false, "post-login redirects can destroy the evaluation context");
+      return "DummyBrowser/1";
+    };
+    const session = await performLogin(options(dir, { launch: fake.launch }));
+    assert.equal(session.userAgent, "DummyBrowser/1");
+  }));
+
   it("verifies a completed login even when the initial document load times out", () => temporary(async (dir) => {
     const fake = fakeBrowser();
     const goto = fake.page.goto;
@@ -153,6 +166,27 @@ describe("manual local login", () => {
       return true;
     });
     assert.equal(await loadSession(opts.config.sessionPath), null);
+  }));
+
+  for (const failure of [
+    { message: "apiRequestContext.get: socket hang up", expected: /connection reset/ },
+    { message: "apiRequestContext.get: unable to get local issuer certificate", expected: /TLS certificate verification failed/ },
+    { message: "apiRequestContext.get: getaddrinfo ENOTFOUND private-host", expected: /DNS lookup failed/ },
+    { message: "apiRequestContext.get: connect ECONNREFUSED private-host", expected: /connection refused/ },
+    { message: "apiRequestContext.get: Invalid character in header content [cookie]", expected: /headers were rejected locally/ },
+    { message: "apiRequestContext.get: unrecognized private failure", expected: /unclassified transport error/ },
+  ]) it(`classifies browser transport failure as ${failure.expected.source} without exposing its call log`, () => temporary(async (dir) => {
+    const fake = fakeBrowser();
+    fake.context.request.get = async () => { throw new Error(`${failure.message}\nCall log:\nCookie: dummy-cookie\nAuthorization: Bearer secret-token`); };
+    const opts = options(dir, { launch: fake.launch });
+    await assert.rejects(performLogin(opts), (error: Error) => {
+      assert.match(error.message, /account verification/);
+      assert.match(error.message, failure.expected);
+      assert.doesNotMatch(error.message, /dummy-cookie|secret-token|private-host|Call log|unrecognized private failure/);
+      return true;
+    });
+    assert.equal(await loadSession(opts.config.sessionPath), null);
+    assert.equal(fake.closes, 1);
   }));
 
   it("waits for manual login after a document timeout and cleans a closed browser promptly", () => temporary(async (dir) => {

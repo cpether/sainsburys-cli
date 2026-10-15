@@ -33,6 +33,7 @@ function childLogin(sessionPath: string, persist: boolean, home: string, cli = f
     chromium.launchPersistentContext=async directory=>{
       profile=directory;
       const page=Object.assign(new EventEmitter(),{
+        async evaluate(){return 'DummyBrowser/1';},
         async goto(){process.stdout.write(JSON.stringify({profile,pid:process.pid})+'\\n');},
         async waitForURL(){await new Promise((_,reject)=>{rejectWait=reject;});},
       });

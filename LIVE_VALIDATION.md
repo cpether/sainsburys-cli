@@ -1,6 +1,6 @@
 # Supervised live validation
 
-Status: pending successful CLI login and verified reads. The first user-supervised attempt appeared to sign in in the browser, then the terminal reported a generic local-login failure. Its cause has not yet been confirmed live. Navigation regression fixes and sanitized failure details now await a retry. The assistant has made no live retailer requests or basket changes. Mocked tests establish local behavior only.
+Status: pending successful CLI login and verified reads. The first user-supervised attempt reached the account/trolley page, then closed with a generic terminal failure. A retry with stage diagnostics captured authenticated credentials, then failed during the separate account-verification transport before a usable HTTP response. The underlying transport cause remains unconfirmed; another diagnostic build now distinguishes fixed TLS, connection, DNS, timeout and response-adapter categories. The assistant has made no live retailer requests or basket changes. Mocked tests establish local behavior only.
 
 ## Login and reads
 
