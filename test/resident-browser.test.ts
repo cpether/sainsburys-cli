@@ -60,6 +60,19 @@ function fakeBrowser(signedIn: boolean) {
 }
 
 describe("resident Chromium engine",()=>{
+  it("reports sign-in route and actual form fields separately without exporting secrets",()=>setup(async(f,e)=>{
+    await e.start({interactive:false,timeoutMs:500});
+    f.setUrl("https://account.sainsburys.co.uk/gol/login?secret=must-not-export");
+    let report=await e.diagnoseAuthentication();
+    assert.equal(report.page,"account_sign_in");
+    assert.equal(report.passwordFieldVisible,false);
+    assert.equal(report.mfaFieldVisible,false);
+    f.state.inputs=[{name:"password",type:"password"},{name:"otp",autocomplete:"one-time-code"}];
+    report=await e.diagnoseAuthentication();
+    assert.equal(report.passwordFieldVisible,true);
+    assert.equal(report.mfaFieldVisible,true);
+    assert.doesNotMatch(JSON.stringify(report),/secret|https:|dummy@example|test-jwt|AbCdEfGh/);
+  }));
   it("verifies a minimized existing profile, retains it, and uses renderer fetch",()=>setup(async(f,e)=>{
     await e.start({interactive:false,timeoutMs:500});
     assert.equal(e.status().authenticated,true);assert.equal(f.shows,0);assert.equal(f.closes,0);
@@ -86,6 +99,18 @@ const change={product_uid:"12345",quantity:1,uom:"ea",selected_catchweight:""};
 const pause=(ms:number)=>new Promise(done=>setTimeout(done,ms));
 
 describe("resident operation confinement",()=>{
+  it("allows bounded order history GETs while rejecting actions and extra query fields",()=>setup(async(f,e)=>{
+    await e.start({interactive:false,timeoutMs:500});
+    const base = `${ORIGIN}/groceries-api/gol-services/order/v1/order`;
+    for (const url of [`${base}?page_size=5&page_number=1`, `${base}/123?placed=true&deliveryPass=false`]) {
+      assert.equal((await e.request({url,method:"GET",headers:{}})).status,200);
+    }
+    const before=f.calls.length;
+    for (const [suffix,method] of [["/123","POST"],["/123/amend","GET"],["/123?amend=true","GET"],["?page_size=51","GET"],["?page_number=0","GET"],["?page_size=5&page_size=6","GET"],["/status/123","GET"]]) {
+      await assert.rejects(e.request({url:base+suffix,method:method!,headers:{}}));
+    }
+    assert.equal(f.calls.length,before);
+  }));
   it("rejects foreign origins, payment, amendments, booking and method overrides before any fetch",()=>setup(async(f,e)=>{
     await e.start({interactive:false,timeoutMs:500});const before=f.calls.length;
     for(const [url,method,headers] of [
@@ -486,6 +511,36 @@ describe("resident page navigation and form detection",()=>{
     setTimeout(()=>f.context.emit("request",{url:()=>`${ORIGIN}/groceries-api/test`,headers:()=>({wcauthtoken:fakeSession().wcauthtoken,authorization:"Bearer fresh"})}),20);
     await started;assert.equal(e.status().authenticated,true);
   }));
+  it("lets a transient account password page silently resume with unchanged cookies and credentials",()=>setup(async(f,e)=>{
+    const goto=f.page.goto.bind(f.page);
+    f.page.goto=async(url:string)=>{
+      await goto(url);
+      f.state.inputs=[{name:"password",type:"password"}];
+      f.setUrl("https://account.sainsburys.co.uk/temporary-sign-in");
+      setTimeout(()=>{f.state.inputs=[];f.setUrl(url);},30);
+    };
+    const epoch=e.getSessionBinding()!.authGeneration;
+    await e.start({interactive:false,timeoutMs:500});
+    assert.equal(e.status().authenticated,true);assert.equal(f.shows,0);assert.equal(f.launches,1);
+    assert.equal(e.getSession()!.authGeneration,epoch);
+    assert.equal(e.getSession()!.bearerToken,fakeSession().bearerToken);
+    assert.equal(f.calls.filter(call=>call.url.endsWith(PROFILE)).length,1);
+  },true,{authGeneration:"00000000-0000-4000-8000-000000000001"}));
+  it("cancels silent sign-in stabilization without showing a login window",()=>setup(async(f,e)=>{
+    f.state.signedIn=false;
+    const controller=new AbortController();
+    const pending=e.start({interactive:false,signal:controller.signal,timeoutMs:500});
+    const timer=setTimeout(()=>controller.abort(),20);
+    try { await assert.rejects(pending,RequestCancelledError); }
+    finally { clearTimeout(timer); }
+    assert.equal(e.status().needsLogin,true);assert.equal(f.shows,0);assert.equal(f.calls.length,0);
+  }));
+  it("keeps silent sign-in stabilization inside a shorter operation deadline",()=>setup(async(f,e)=>{
+    f.state.signedIn=false;const began=Date.now();
+    await assert.rejects(e.start({interactive:false,timeoutMs:30}),AuthError);
+    assert.ok(Date.now()-began<500,"The settling period must not extend the operation deadline");
+    assert.equal(f.visits.length,1);assert.equal(f.shows,0);assert.equal(f.calls.length,0);
+  }));
   for(const input of [{name:"secret",type:"password"},{name:"verification",type:"text",autocomplete:"one-time-code"}]){
     it(`accepts verified identity before a stale visible ${input.type==="password"?"password":"MFA"} form`,()=>setup(async(f,e)=>{
       f.state.inputs=[input];await e.start({interactive:false,timeoutMs:500});
@@ -494,6 +549,14 @@ describe("resident page navigation and form detection",()=>{
     it(`requires explicit login for a real ${input.type==="password"?"password":"MFA"} form after credential verification fails`,()=>setup(async(f,e)=>{
       f.state.inputs=[input];f.handler=async()=>new Response('{}',{status:401});
       await assert.rejects(e.start({interactive:false,timeoutMs:500}),AuthError);
+      assert.equal(e.status().needsLogin,true);assert.equal(f.shows,0);
+    }));
+    it(`stops after a stable ${input.type==="password"?"password":"MFA"} form without another navigation or read retry`,()=>setup(async(f,e)=>{
+      await e.start({interactive:false,timeoutMs:500});const visits=f.visits.length,calls=f.calls.length;
+      f.state.inputs=[input];f.handler=async()=>new Response('{}',{status:401});
+      await assert.rejects(e.request({url:PRODUCT,method:"GET",headers:{}}),AuthError);
+      assert.equal(f.visits.length,visits+1);assert.equal(f.calls.length,calls+2);
+      assert.equal(f.calls.slice(calls).filter(call=>call.url===PRODUCT).length,1);
       assert.equal(e.status().needsLogin,true);assert.equal(f.shows,0);
     }));
   }

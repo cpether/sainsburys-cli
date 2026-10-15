@@ -12,13 +12,23 @@ import { ApiError, AuthError, RequestCancelledError, RequestTimeoutError, Respon
 export interface ResidentBrowserOptions { config: Config; session?: Session; launch?: typeof launchContext }
 export interface ResidentRequest { url: string; method: string; headers: Record<string, string>; body?: string }
 export interface ResidentResponse { status: number; headers: Record<string, string>; body: string }
+export interface AuthenticationDiagnostic {
+  authenticated: boolean;
+  page: "retailer" | "account_sign_in" | "account_other" | "other" | "absent";
+  passwordFieldVisible: boolean;
+  mfaFieldVisible: boolean;
+  credentialPairsObserved: number;
+  storedCredentialsAvailable: boolean;
+}
 type Pair = { wc: string; bearer: string };
 type RendererReply = ResidentResponse | { error: "origin" | "redirect" | "size" | "cancelled" | "deadline" | "network" };
 const ORIGIN = "https://www.sainsburys.co.uk";
 const PROFILE = "/groceries-api/gol-services/customer/v1/customer/profile";
 const BASKET = "/groceries-api/gol-services/basket/v2/basket";
 const ORDER_STATUS = "/groceries-api/gol-services/order/v1/order/status";
+const ORDER_HISTORY = "/groceries-api/gol-services/order/v1/order";
 const SLOT_LIST = "/groceries-api/gol-services/slot/v2/slots";
+const SIGN_IN_SETTLE_MS = 1_000;
 const READ_PATHS = new Set([PROFILE, BASKET, ORDER_STATUS,
   "/groceries-api/gol-services/slot/v1/slot/reservation",
   "/groceries-api/gol-services/product/v1/product",
@@ -65,6 +75,25 @@ export class ResidentBrowser {
     return this.current ? {userId:this.current.userId,authGeneration:this.current.authGeneration} : undefined;
   }
   status(): { authenticated: boolean; needsLogin: boolean } { return { authenticated: this.authenticated, needsLogin: !this.authenticated }; }
+
+  /** Fixed categories only: no URLs, DOM text, account data or credential values. */
+  async diagnoseAuthentication(): Promise<AuthenticationDiagnostic> {
+    const page = this.page;
+    let category: AuthenticationDiagnostic["page"] = "absent";
+    if (page) {
+      try {
+        const url = new URL(page.url());
+        category = url.origin === ORIGIN ? "retailer" : url.origin === "https://account.sainsburys.co.uk"
+          ? url.pathname.startsWith("/gol/login") ? "account_sign_in" : "account_other" : "other";
+      } catch { category = "other"; }
+    }
+    const visible = async (selector: string) => page ? page.locator(selector).first().isVisible().catch(() => false) : false;
+    const [passwordFieldVisible, mfaFieldVisible] = await Promise.all([
+      visible('input[type="password"]'), visible('input[autocomplete="one-time-code"]'),
+    ]);
+    return {authenticated:this.authenticated,page:category,passwordFieldVisible,mfaFieldVisible,
+      credentialPairsObserved:this.candidates.length,storedCredentialsAvailable:!!this.current};
+  }
 
   async start(opts: { interactive: boolean; signal?: AbortSignal; timeoutMs?: number }): Promise<void> {
     try { await this.budget(opts.signal, opts.timeoutMs ?? 20_000, signal => this.enqueue(signal, async () => {
@@ -275,11 +304,16 @@ export class ResidentBrowser {
     const tried = new Set<string>();
     const attempts = new Map<string,number>();
     let cookieState = "";
+    let retailerState: boolean | undefined;
+    let signInSince: number | undefined;
     for (;;) {
       check(signal);
-      // A browser challenge may refresh cookies without changing either token.
+      // Browser challenges and OAuth redirects can reuse both captured tokens.
       const latestCookies = JSON.stringify(await raceAbort(this.context!.cookies(),signal));
-      if (latestCookies !== cookieState) { tried.clear(); cookieState = latestCookies; }
+      const onRetailer = this.retailerPage();
+      if (latestCookies !== cookieState || onRetailer !== retailerState) {
+        tried.clear(); cookieState = latestCookies; retailerState = onRetailer;
+      }
       for (const candidate of [...this.candidates].reverse()) {
         const key = `${candidate.wc}\n${candidate.bearer}`;
         if (tried.has(key) || (attempts.get(key) ?? 0) >= 3) continue;
@@ -293,9 +327,13 @@ export class ResidentBrowser {
           if (!(error instanceof AuthError) && !(error instanceof ResponseValidationError)) throw error;
         }
       }
-      // A normal shopping page may contain postcode or voucher fields. Verify
-      // available credentials before treating an actual sign-in form as decisive.
-      if (!interactive && await this.humanForm()) throw humanRequired();
+      // A real sign-in form can briefly appear during silent website redirects.
+      // Keep verification alive for a bounded settling period inside the existing
+      // operation deadline. Never submit credentials or restart navigation here.
+      if (!interactive && await this.humanForm()) {
+        signInSince ??= Date.now();
+        if (Date.now() - signInSince >= SIGN_IN_SETTLE_MS) throw humanRequired();
+      } else signInSince = undefined;
       await this.wait(signal);
     }
   }
@@ -477,7 +515,7 @@ function validateRequest(input:ResidentRequest):ResidentRequest {
   try {url=new URL(input.url);}catch{throw new Error("Invalid resident retailer request.");}
   const method=input.method.toUpperCase();
   if(url.origin!==ORIGIN || url.username || url.password || url.hash ||
-    !(method==="GET"&&READ_PATHS.has(url.pathname) || method==="POST"&&url.pathname===SLOT_LIST ||
+    !(method==="GET"&&(READ_PATHS.has(url.pathname) || isOrderHistoryRead(url)) || method==="POST"&&url.pathname===SLOT_LIST ||
       method==="POST"&&url.pathname===`${BASKET}/item` || method==="PUT"&&url.pathname===BASKET))throw new Error("Unsupported resident retailer operation.");
   const override=Object.entries(input.headers).find(([key])=>key.toLowerCase()==="x-http-method-override")?.[1];
   if (override !== undefined && !(method === "POST" && url.pathname === SLOT_LIST && override.toUpperCase() === "GET")) throw new Error("Unsupported resident method override.");
@@ -492,6 +530,20 @@ function validateRequest(input:ResidentRequest):ResidentRequest {
     validateSlotBody(input.body);
   }
   return {...input,url:url.toString(),method};
+}
+
+function isOrderHistoryRead(url: URL): boolean {
+  const list = url.pathname === ORDER_HISTORY;
+  if (!list && !new RegExp(`^${ORDER_HISTORY}/[0-9]+$`).test(url.pathname)) return false;
+  for (const key of url.searchParams.keys()) {
+    const value = url.searchParams.get(key)!;
+    if (url.searchParams.getAll(key).length !== 1) return false;
+    if (list) {
+      if (!["page_size", "page_number"].includes(key) || !/^[1-9][0-9]*$/.test(value)) return false;
+      if (Number(value) > (key === "page_size" ? 50 : 1000)) return false;
+    } else if (!["placed", "deliveryPass"].includes(key) || !["true", "false"].includes(value)) return false;
+  }
+  return true;
 }
 
 function validateWriteQuery(url:URL):void {

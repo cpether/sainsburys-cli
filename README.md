@@ -28,10 +28,13 @@ The default private state directory is `~/.config/sainsburys`. Use `SAINSBURYS_S
 
 ```sh
 node dist/cli/index.js --json auth status
+node dist/cli/index.js --json auth diagnose
 node dist/cli/index.js auth stop
 node dist/cli/index.js auth logout
 node dist/cli/index.js auth login --no-persist
 ```
+
+`auth diagnose` inspects the already-running session without login, navigation or a retailer request. It reports fixed page and form categories and credential-presence counts, never URLs, page text, cookies, tokens or account details. A visible password/MFA field distinguishes a real sign-in prompt from a failed session-recovery flag; it does not establish why the retailer rejected the session. An older resident process must be restarted to load this command's service support.
 
 Logout deletes the local session and its account profiles. The old version's shared `browser-data` profile is removed automatically only in the known default config directory. If that folder exists next to a custom session path, logout clears the credentials and profiles it owns, then reports incomplete cleanup and asks you to verify the remaining folder's ownership before removing it. An active temporary login is also left alone and reported; other owned and abandoned state is still cleared. It does not revoke tokens someone already copied or delete an old plaintext `.env` password; remove any such password locally. `--no-persist` creates and removes a fresh temporary browser profile, writes no cached session and does not reuse an existing profile. It is a login check, not an agent session.
 
@@ -50,6 +53,8 @@ node dist/cli/index.js --json product search porridge oats
 node dist/cli/index.js --json product get 12345
 node dist/cli/index.js --json basket show
 node dist/cli/index.js --json slot current
+node dist/cli/index.js --json order list --page-size 5
+node dist/cli/index.js --json order get 123456789
 ```
 
 `customer context` derives the store and delivery time from the live account and reservation. An explicit `--store 0123` or `SAINSBURYS_STORE_NUMBER` overrides the store. Unknown store context fails with instructions to compare the website and provide an override. The old generic store fallback is gone. Search uses the observed keyword-search request; product lookup rechecks shortlisted items against the reserved slot before planning. Search is not a promise of final availability. Slot listing uses only the current basket's product SKUs, with no historical-order fallback.

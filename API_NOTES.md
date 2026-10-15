@@ -32,7 +32,9 @@ All paths below are under `/groceries-api/gol-services/` on the exact retailer H
 - `POST slot/v2/slots` is a read-only query with the mandatory `X-HTTP-Method-Override: GET` header. Its body has `week_number`, `slot_type`, `product_uids`, `is_slot_locked`, `store_identifier`, `delivery_type`. The current implementation defaults to `delivery_type=["1hour"]`. Product IDs come only from the current basket; partial/missing numeric IDs are an error, and past groceries are never substituted. Slot booking is unavailable.
 - `GET coupon/v1/coupon` returns `coupons`, with coupon fields nested under `promotion`. Failure is an error, not an empty coupon list. Coupon application stays on the website.
 
-The retained read-only order list/detail API functions are not exposed as CLI commands. They are useful protocol knowledge; their less-used response fields have limited validation. Payment/amendment/booking execution code has been removed rather than hidden behind documentation.
+The retained read-only order list/detail API functions are exposed as `order list` and `order get <numeric-id>`. The resident transport allows only GETs to the exact list path or a numeric detail path, with bounded pagination or boolean detail query options. These retained request shapes and their less-used response fields have limited live validation. Payment/amendment/booking execution code has been removed rather than hidden behind documentation.
+
+On 15 October 2026, the CLI listed all 12 available previous orders and read their details through the resident transport. Existing list/detail validators accepted the responses. No order was amended, and no payment or slot change was made. Historical line units differ from current product sold-by units, so reordering must resolve current product units rather than copying historical `uom` values.
 
 ## Identifiers, units and estimates
 
