@@ -2,7 +2,7 @@
 
 This fork starts at audited source commit `dde7355e8b52aa64583f3ab0516fbcf35f3c45b6` of [yousefamar/sainsburys-cli](https://github.com/yousefamar/sainsburys-cli). It keeps its browser authentication capture and retailer request shapes, with a smaller CLI for searching, reviewing and verifying basket changes. You review and pay on [Sainsbury's website](https://www.sainsburys.co.uk/gol-ui/trolley).
 
-Payment, existing-order amendments and slot booking have no supported command or shipped implementation. Basket writes reject amend mode. MFA is manual. The supervised basket pilot demonstrated add, quantity update, repeated-plan idempotence and restoration, but removal's immediate verification failed and a subsequent read required authentication. The empty basket was subsequently verified through both the website and a fresh API read after local login. Session reliability and a clean follow-up pilot remain pending in [LIVE_VALIDATION.md](LIVE_VALIDATION.md).
+Payment, existing-order amendments and slot booking have no supported command or shipped implementation. Basket writes reject amend mode. MFA is manual. Two supervised basket pilots left the original empty basket restored and verified through both the website and fresh API reads. Both encountered an unknown write outcome followed by authentication rejection, including the second pilot after cookie hardening. The CLI is not yet dependable for routine basket writes. Further live write pilots are paused pending diagnosis; see [LIVE_VALIDATION.md](LIVE_VALIDATION.md).
 
 ## Setup
 

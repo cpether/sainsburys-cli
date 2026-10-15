@@ -42,6 +42,8 @@ The supervised ordinary-item lookup returned a bulk `retail_price.measure` of `e
 
 ## Unresolved live questions
 
-Check sustained session reuse/expiry, response-cookie changes, the bearer/cookie combination and bot challenges. Initial identity, search region, no-reservation store context and a first addition have live evidence. Quantity-zero removal occurred but its immediate CLI readback failed, so clean mutation verification remains open. Compare delivery prices, Nectar/promotional prices, catchweight totals and booked-slot context with the website. Record sanitized response shapes and concrete failures before changing the transport approach.
+The second approved pilot after cookie hardening lost API access immediately after its first add. The add reached the website, immediate CLI readback returned an unknown outcome, and a fresh read required authentication. Explicit local login recovered access. A fresh removal plan then passed immediate readback, and a separate API read plus the website confirmed the original empty basket. Further live writes are paused; this is not a clean end-to-end pass.
+
+Compare bounded read-only HTTP and authenticated-browser requests before proposing a replacement transport. Preserve fixed endpoint labels, status/content-type categories and sanitized schema results only. No exact cause has been established. Sustained session reuse, natural expiry, the bearer/cookie combination and bot challenges remain open questions. Initial identity, search region, no-reservation store context and ordinary-item mutations have live evidence, with intermittent verification failure. Delivery prices, Nectar/promotional prices, catchweight totals and booked-slot context still need website comparison.
 
 The old upstream payment listener accepted an order ID as success without establishing payment completion. Its behavior is not evidence of a completed order. This fork contains no payment completion claim or automatic payment path.
