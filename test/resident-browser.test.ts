@@ -143,6 +143,7 @@ describe("resident session recovery and cancellation",()=>{
   }));
   it("does not replay POST/PUT after authentication failure",()=>setup(async(f,e)=>{
     await e.start({interactive:false,timeoutMs:500});const original=f.handler;let writes=0;const navigations=f.visits.length;
+    f.context.emit("request",{url:()=>`${ORIGIN}/groceries-api/test`,headers:()=>({wcauthtoken:fakeSession().wcauthtoken,authorization:"Bearer rotated"})});
     f.handler=async(url,init)=>init.method==="POST"||init.method==="PUT"?(writes++,new Response('{}',{status:401,headers:{"content-type":"application/json"}})):original(url,init);
     const r=await e.request({url:`${BASKET}/item${WRITE_QUERY}`,method:"POST",headers:{},body:JSON.stringify(change)});
     assert.equal(r.status,401);assert.equal(writes,1);assert.equal(f.visits.length,navigations);
@@ -194,6 +195,27 @@ describe("resident session recovery and cancellation",()=>{
 });
 
 describe("resident lifecycle regressions",()=>{
+  it("verifies a newer observed credential pair before navigating on a rejected read",()=>setup(async(f,e)=>{
+    await e.start({interactive:false,timeoutMs:500});const original=f.handler;const visits=f.visits.length;
+    const epoch=e.getSession()!.authGeneration;
+    f.context.emit("request",{url:()=>`${ORIGIN}/groceries-api/test`,headers:()=>({wcauthtoken:fakeSession().wcauthtoken,authorization:"Bearer rotated"})});
+    f.handler=async(url,init)=>url===PRODUCT?new Response('{}',{status:new Headers(init.headers).get("authorization")==="Bearer rotated"?200:401,headers:{"content-type":"application/json"}}):original(url,init);
+    const response=await e.request({url:PRODUCT,method:"GET",headers:{}});
+    assert.equal(response.status,200);assert.equal(f.visits.length,visits);assert.equal(f.shows,0);
+    assert.equal(e.getSession()!.bearerToken,"rotated");assert.equal(e.getSession()!.authGeneration,epoch);
+    assert.equal(f.calls.filter(call=>call.url===PRODUCT).length,2);
+  }));
+  it("rejects a rotated pair with a different verified identity before falling back to navigation",()=>setup(async(f,e)=>{
+    await e.start({interactive:false,timeoutMs:500});const original=f.handler;const visits=f.visits.length;
+    f.context.emit("request",{url:()=>`${ORIGIN}/groceries-api/test`,headers:()=>({wcauthtoken:fakeSession().wcauthtoken,authorization:"Bearer other-account"})});
+    f.handler=async(url,init)=>{
+      if(url.endsWith(PROFILE)&&new Headers(init.headers).get("authorization")==="Bearer other-account")return new Response('{"user_id":"999","email":"other@example.invalid"}',{headers:{"content-type":"application/json"}});
+      return url===PRODUCT?new Response('{}',{status:401}):original(url,init);
+    };
+    const response=await e.request({url:PRODUCT,method:"GET",headers:{}});
+    assert.equal(response.status,401);assert.equal(f.visits.length,visits+1);
+    assert.equal(e.getSession()!.bearerToken,fakeSession().bearerToken);assert.equal(f.shows,0);
+  }));
   it("rechecks unchanged tokens when the browser refreshes only its cookies",()=>setup(async(f,e)=>{
     f.state.emit=false;let revision=0;
     f.context.cookies=async()=>fakeSession().cookies.map(cookie=>cookie.name==="_abck"?{...cookie,value:`dummy-${revision}`}:cookie);

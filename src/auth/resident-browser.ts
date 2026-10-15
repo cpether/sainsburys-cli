@@ -271,18 +271,7 @@ export class ResidentBrowser {
         tried.add(key);
         attempts.set(key,(attempts.get(key) ?? 0)+1);
         try {
-          const userId = await this.verify(candidate, signal);
-          const session: Session = {
-            cookies: await captureCookies(this.context!), wcauthtoken:candidate.wc,bearerToken:candidate.bearer,
-            userId,accountEmail:this.expectedEmail,capturedAt:Date.now(),
-            authGeneration:newGeneration ? randomUUID() : this.current?.authGeneration ?? randomUUID(),
-            browserManaged:true,
-            userAgent:this.userAgent!,
-          };
-          check(signal);
-          await saveSession(this.config.sessionPath,session,signal);
-          check(signal);
-          this.current = session; this.pair = candidate; this.authenticated = true;
+          await this.acceptCandidate(candidate,signal,newGeneration);
           return;
         } catch (error) {
           if (signal.aborted) throw error;
@@ -321,6 +310,21 @@ export class ResidentBrowser {
     return this.verifyIdentityResponse(response,pair);
   }
 
+  private async acceptCandidate(candidate: Pair, signal: AbortSignal, newGeneration: boolean): Promise<void> {
+    const userId = await this.verify(candidate, signal);
+    const session: Session = {
+      cookies: await captureCookies(this.context!), wcauthtoken:candidate.wc,bearerToken:candidate.bearer,
+      userId,accountEmail:this.expectedEmail,capturedAt:Date.now(),
+      authGeneration:newGeneration ? randomUUID() : this.current?.authGeneration ?? randomUUID(),
+      browserManaged:true,
+      userAgent:this.userAgent!,
+    };
+    check(signal);
+    await saveSession(this.config.sessionPath,session,signal);
+    check(signal);
+    this.current = session; this.pair = candidate; this.authenticated = true;
+  }
+
   private verifyIdentityResponse(response:ResidentResponse,pair:Pair):string {
     if (response.status !== 200 || !response.headers["content-type"]?.toLowerCase().includes("json")) throw humanRequired();
     let profile;
@@ -337,6 +341,17 @@ export class ResidentBrowser {
   }
 
   private async recoverRead(signal: AbortSignal): Promise<void> {
+    // The running SPA may have rotated its tokens since login. Verify those
+    // complete observed pairs before navigation discards the live page state.
+    if (this.retailerPage()) for (const candidate of [...this.candidates].reverse()) {
+      if (candidate.wc === this.pair?.wc && candidate.bearer === this.pair?.bearer) continue;
+      try {
+        await this.acceptCandidate(candidate,signal,false);
+        return;
+      } catch (error) {
+        if (signal.aborted || !(error instanceof AuthError || error instanceof ResponseValidationError)) throw error;
+      }
+    }
     await this.window(false);
     await this.navigate(signal);
     await this.authenticate(signal,false,false);
