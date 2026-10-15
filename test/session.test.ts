@@ -35,8 +35,14 @@ describe("session storage", () => {
   });
 
   it("clearSession is idempotent on missing file", async () => {
-    const path = join(tmpdir(), "missing-" + Math.random());
-    await clearSession(path); // should not throw
+    const dir = mkdtempSync(join(tmpdir(), "sainsburys-logout-test-"));
+    try {
+      const path = join(dir, "missing.json");
+      await clearSession(path);
+      await clearSession(path);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
