@@ -83,7 +83,7 @@ describe("private authentication storage", () => {
     await writeFile(join(legacy, "unrelated"), "preserve");
     await assert.rejects(clearSession(path), /Logout is incomplete/);
     assert.equal(await readFile(join(legacy, "unrelated"), "utf8"), "preserve");
-    assert.ok(await loadSession(path));
+    assert.equal(await loadSession(path), null);
     await rm(legacy, {recursive:true});
     await clearSession(path);
     assert.equal(await loadSession(path), null);

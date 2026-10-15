@@ -1,5 +1,5 @@
 import { cookieHeader, type Session } from "../auth/session.js";
-import { interruptionSignal } from "../auth/lifecycle.js";
+import { beginUnverifiedWrite, interruptionSignal } from "../auth/lifecycle.js";
 import { ENABLED_FEATURE_FLAGS } from "../lib/feature-flags.js";
 
 export const RETAILER_ORIGIN = "https://www.sainsburys.co.uk";
@@ -115,6 +115,7 @@ export class GroceriesClient {
     if (signal.aborted) throw new RequestCancelledError();
     const controller = new AbortController();
     let attemptedMutation = false;
+    let finishMutation: (() => void) | undefined;
     let timedOut = false;
     let rejectAborted!: (error: Error) => void;
     const aborted = new Promise<never>((_, reject) => { rejectAborted = reject; });
@@ -127,7 +128,10 @@ export class GroceriesClient {
     signal.addEventListener("abort", onAbort, { once: true });
     try {
       return await Promise.race([
-        this.requestInternal(url, opts, controller.signal, maxBytes, isRead, false, () => { attemptedMutation = true; }),
+        this.requestInternal(url, opts, controller.signal, maxBytes, isRead, false, () => {
+          attemptedMutation = true;
+          finishMutation ??= beginUnverifiedWrite();
+        }),
         aborted,
       ]);
     } catch (error) {
@@ -139,6 +143,7 @@ export class GroceriesClient {
     } finally {
       clearTimeout(timer);
       signal.removeEventListener("abort", onAbort);
+      finishMutation?.();
     }
   }
 

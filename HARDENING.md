@@ -21,7 +21,7 @@ The automated suite executes application modules and the CLI with dummy credenti
 | Authority and outcomes | Amendment rejection from both basket and active-order status, snapshot/account/context/price binding, public-hash hostile plan revalidation, enforced quantity/estimated spending limits, per-write readback, unchanged unrelated lines, partial/mismatch/unknown outcomes |
 | Supported CLI | Actual JSON search/basket/plan/apply operations, rejected payment/amendment/booking/additive commands before network, structured failure results and exit codes, no duplicate addition on reapply |
 
-Final checks: clean lockfile install, typecheck, build and 130 automated tests pass. `npm audit --audit-level=low` reports zero vulnerabilities, including development dependencies. CI uses Node 22/24 on Linux/macOS. The local run used Node 25.8.1 on macOS; remote CI results are recorded on the draft PR.
+Final checks: clean lockfile install, typecheck, build and 138 automated tests pass. `npm audit --audit-level=low` reports zero vulnerabilities, including development dependencies. CI uses Node 22/24 on Linux/macOS. The local run used Node 25.8.1 on macOS; remote CI results are recorded on the draft PR.
 
 ## Independent review
 
@@ -34,6 +34,8 @@ The requested external review runs through the authenticated Claude CLI with `--
 The fixes also reconcile aliases when choosing an existing line for update, reject contradictory numeric identifiers, preserve idempotence across the observed response shapes, reclaim dead-process locks without deleting a new live claim, clean abandoned temporary authentication state on logout, abort HTTP on graceful signals, and let CLI cleanup finish before exit. SIGKILL/power loss still cannot execute immediate cleanup. Unknown live lock owners fail closed.
 
 The Standards review's confirmed product/line-ID defect and two duplication concerns were resolved. Automatic dotenv loading, terminal control sequences in retailer text, and deletion of an unverified legacy folder beside a custom session path were also addressed. The HTTP client's tested read-refresh seam remains available as a library feature; the agent CLI still requires explicit local login. Policy/input failures retain the documented exit code 1.
+
+The second Claude pass independently exported and tested the committed fix, found no material blockers, and stress-tested 16 processes across 107 critical sections with six killed holders and no overlaps. Its additional logout-refusal finding was fixed: owned session/profile/temporary state is cleared before reporting any live or unverified state left behind. Abandoned lock candidates are recovered on the next acquisition. SIGINT/SIGTERM now emit one structured JSON result, tracking an unverified write through authoritative basket readback; the six real CLI interruption cases and both logout-recovery cases pass. A final focused Claude pass reviews these last changes before merge.
 
 ## Limits and next action
 

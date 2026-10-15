@@ -85,9 +85,27 @@ async function reclaimDeadLock(path: string): Promise<void> {
   }
 }
 
+/** Candidates have never held the lock and contain only their unique PID claim. */
+async function clearDeadCandidates(path: string): Promise<void> {
+  const prefix = `${basename(path)}.`;
+  for (const entry of await readdir(dirname(path))) {
+    if (!entry.startsWith(prefix)) continue;
+    const owner = /^([1-9]\d*)-[a-f0-9-]{36}\.owner\.candidate$/.exec(entry.slice(prefix.length));
+    if (!owner || processIsAlive(Number(owner[1]))) continue;
+    const candidate = join(dirname(path), entry);
+    const info = await lstat(candidate).catch((err: NodeJS.ErrnoException) => {
+      if (err.code === "ENOENT") return null;
+      throw err;
+    });
+    if (info?.isDirectory() && !info.isSymbolicLink() && (info.mode & 0o077) === 0 &&
+        (!process.getuid || info.uid === process.getuid())) await rm(candidate, {recursive:true,force:true});
+  }
+}
+
 /** Atomic, nonempty directory locks work across processes and recover dead owners. */
 export async function withAuthLock<T>(path: string, run: () => Promise<T>, timeoutMs = 5_000): Promise<T> {
   await privateDirectory(dirname(path));
+  await clearDeadCandidates(path);
   const deadline = Date.now() + timeoutMs;
   const claim = `${process.pid}-${randomUUID()}.owner`;
   const candidate = `${path}.${claim}.candidate`;
@@ -140,15 +158,18 @@ async function clearAbandonedTemporaryProfiles(sessionPath: string): Promise<voi
     const info = await lstat(root);
     if (!info.isDirectory() || info.isSymbolicLink() || (info.mode & 0o077) !== 0 ||
         (process.getuid && info.uid !== process.getuid())) throw new Error("Unsafe temporary authentication directory.");
+    const remaining: string[] = [];
     for (const entry of await readdir(root)) {
       const owner = /^([1-9]\d*)-[a-f0-9-]{36}$/.exec(entry);
-      if (!owner) throw new Error("Unrecognized temporary authentication profile; inspect local storage.");
-      if (processIsAlive(Number(owner[1]))) throw new Error("A temporary login is still active. Close it locally before logging out.");
-      await rm(join(root, entry), { recursive: true, force: true });
+      if (!owner) { remaining.push("unrecognized temporary authentication profile; inspect local storage"); continue; }
+      if (processIsAlive(Number(owner[1]))) { remaining.push("a temporary login is still active; close it locally, then run logout again"); continue; }
+      try { await rm(join(root, entry), { recursive: true, force: true }); }
+      catch { remaining.push("an abandoned temporary profile could not be removed"); }
     }
     await rmdir(root).catch((err: NodeJS.ErrnoException) => {
       if (!["ENOENT", "ENOTEMPTY", "EEXIST"].includes(err.code ?? "")) throw err;
     });
+    if (remaining.length) throw new Error(remaining.join("; "));
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
   }
@@ -230,21 +251,28 @@ export async function clearSession(path: string): Promise<void> {
       throw err;
     });
     const knownLegacyDirectory = resolve(dirname(path)) === resolve(join(homedir(), ".config", "sainsburys"));
+    const remaining: string[] = [];
+    const attempt = async (action: () => Promise<void>, failure: string) => {
+      try { await action(); }
+      catch (err) { remaining.push(`${failure}${err instanceof Error ? `: ${err.message}` : ""}`); }
+    };
     if (legacyInfo && !knownLegacyDirectory) {
-      throw new Error("Logout is incomplete: a legacy browser-data folder beside this custom session path has unverified ownership. Inspect it locally before removing or relocating it, then run logout again.");
+      remaining.push("a legacy browser-data folder beside this custom session path has unverified ownership; inspect it locally before removing or relocating it");
     }
-    await clearAbandonedTemporaryProfiles(path);
-    await rm(path, { force: true });
-    // A SIGKILL during an atomic save can leave its private temporary file.
-    const prefix = `${basename(path)}.`;
-    for (const entry of await readdir(dirname(path))) {
-      if (entry.startsWith(prefix) && /^[a-f0-9-]{36}\.tmp$/.test(entry.slice(prefix.length))) {
-        await rm(join(dirname(path), entry), { force: true });
+    // Clear owned credentials even if a separate profile cannot safely be removed.
+    await attempt(() => rm(path, {force:true}), "session file could not be removed");
+    await attempt(() => rm(profileRoot(path), {recursive:true,force:true}), "persistent profiles could not be removed");
+    await attempt(async () => {
+      const prefix = `${basename(path)}.`;
+      for (const entry of await readdir(dirname(path))) {
+        if (entry.startsWith(prefix) && /^[a-f0-9-]{36}\.tmp$/.test(entry.slice(prefix.length))) {
+          await rm(join(dirname(path), entry), {force:true});
+        }
       }
-    }
-    await rm(profileRoot(path), { recursive: true, force: true });
-    // The original profile name is only known to belong to this app in its default directory.
-    if (knownLegacyDirectory) await rm(legacy, { recursive: true, force: true });
+    }, "interrupted session files could not be removed");
+    await attempt(() => clearAbandonedTemporaryProfiles(path), "temporary profile cleanup is incomplete");
+    if (knownLegacyDirectory) await attempt(() => rm(legacy, {recursive:true,force:true}), "legacy profile could not be removed");
+    if (remaining.length) throw new Error(`Logout is incomplete: ${remaining.join("; ")}. Run logout again after resolving the remaining state.`);
   }));
 }
 

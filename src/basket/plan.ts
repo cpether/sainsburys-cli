@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { withAuthLock } from "../auth/session.js";
+import { beginUnverifiedWrite } from "../auth/lifecycle.js";
 import { addItem, findItemBySku, getBasket, itemIdentifiers, normalizeIdentifier, productUid, updateItems, validateQuantity, type BasketContext } from "../api/basket.js";
 import { getActiveOrderStatus } from "../api/order.js";
 import { getProductsByUid, type ProductQueryContext } from "../api/product.js";
@@ -242,23 +243,26 @@ async function applyLocked(c: PlanContext, value: unknown, approval: string): Pr
       if (quantityState(stateForPlan(before, plan)) !== quantityState(expectedLines(plan, applied))) throw new Error("Basket changed during application");
       if (before.basket_id !== plan.basketId) throw new Error("Basket identity changed during application");
       const line = findPlannedLine(before, plan, ch.key);
-      let writeError: unknown;
+      const finishWrite = beginUnverifiedWrite();
       try {
-        if (line) await updateItems(c.client, c.basketContext, [{ productUid: ch.sku, itemUid: line.item_uid!, quantity: ch.to, uom: ch.uom, selectedCatchweight: ch.selectedCatchweight, decreasingQuantity: ch.to < line.quantity }]);
-        else if (ch.to) await addItem(c.client, c.basketContext, { productUid: ch.sku, quantity: ch.to, uom: ch.uom, selectedCatchweight: ch.selectedCatchweight });
-      } catch (err) { writeError = err; }
-      let after: Basket;
-      let afterState: StateLine[];
-      try { after = await getBasket(c.client, c.basketContext); afterState = stateForPlan(after, plan); }
-      catch { throw new BasketApplyError("Write outcome is unknown because basket readback failed. Inspect the website before any further change.", "unknown", completed); }
-      basket = after;
-      if (after.basket_id !== plan.basketId || after.is_in_amend_mode || quantityState(afterState) !== quantityState(expectedLines(plan, [...applied, ch]))) {
-        throw new BasketApplyError(writeError ? "Write outcome is uncertain or differs from the target. Inspect the basket before creating a new plan." : "Basket readback differs from the target or changed another line.", writeError ? "unknown" : "mismatch", completed, after);
-      }
-      completed++;
-      applied.push(ch);
-      enforceBasket(after, plan.constraints);
-      // A failed HTTP write can still be verified by authoritative readback. Never retry it.
+        let writeError: unknown;
+        try {
+          if (line) await updateItems(c.client, c.basketContext, [{ productUid: ch.sku, itemUid: line.item_uid!, quantity: ch.to, uom: ch.uom, selectedCatchweight: ch.selectedCatchweight, decreasingQuantity: ch.to < line.quantity }]);
+          else if (ch.to) await addItem(c.client, c.basketContext, { productUid: ch.sku, quantity: ch.to, uom: ch.uom, selectedCatchweight: ch.selectedCatchweight });
+        } catch (err) { writeError = err; }
+        let after: Basket;
+        let afterState: StateLine[];
+        try { after = await getBasket(c.client, c.basketContext); afterState = stateForPlan(after, plan); }
+        catch { throw new BasketApplyError("Write outcome is unknown because basket readback failed. Inspect the website before any further change.", "unknown", completed); }
+        basket = after;
+        if (after.basket_id !== plan.basketId || after.is_in_amend_mode || quantityState(afterState) !== quantityState(expectedLines(plan, [...applied, ch]))) {
+          throw new BasketApplyError(writeError ? "Write outcome is uncertain or differs from the target. Inspect the basket before creating a new plan." : "Basket readback differs from the target or changed another line.", writeError ? "unknown" : "mismatch", completed, after);
+        }
+        completed++;
+        applied.push(ch);
+        enforceBasket(after, plan.constraints);
+        // A failed HTTP write can still be verified by authoritative readback. Never retry it.
+      } finally { finishWrite(); }
     } catch (error) {
       if (error instanceof BasketApplyError) throw error;
       throw new BasketApplyError(`Basket application stopped${completed ? " after partial completion" : ""}: ${error instanceof Error ? error.message : "verification failed"}`, completed ? "partial" : "mismatch", completed, basket);

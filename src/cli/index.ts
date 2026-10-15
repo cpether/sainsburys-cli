@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { Command, CommanderError } from "commander";
-import { printError, exitCodeFor } from "./output.js";
+import { printError, printInterruption, exitCodeFor } from "./output.js";
+import { installInterruptionReporter } from "../auth/lifecycle.js";
 import { authCommand } from "./commands/auth.js";
 import { basketCommand } from "./commands/basket.js";
 import { customerCommand } from "./commands/customer.js";
@@ -44,6 +45,7 @@ function configureErrors(command: Command): void {
 }
 configureErrors(program);
 
+const unregisterInterruptionReporter = installInterruptionReporter(printInterruption);
 program.parseAsync(process.argv).catch((err) => {
   if (err instanceof CommanderError && err.exitCode === 0) return;
   if (err instanceof CommanderError) {
@@ -53,4 +55,4 @@ program.parseAsync(process.argv).catch((err) => {
   }
   printError(err);
   process.exitCode = exitCodeFor(err);
-});
+}).finally(unregisterInterruptionReporter);
