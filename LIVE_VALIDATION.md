@@ -4,7 +4,7 @@ Status on 15 October 2026: two approved reversible pilots have run. Neither was 
 
 The earlier generic login failure was followed by a verification failure. Claude independently reproduced an adapter bug with multiple Set-Cookie headers using real Playwright HTTP and a dummy loopback server. The fixed adapter and refreshed-cookie export were followed by successful live login and cached reads. The unslotted reservation also omitted `is_expired`; the parser now accepts that observed form while requiring an explicit expiry flag whenever a slot is present. Synthetic regression fixtures preserve the field layout without account values. No real session, HAR or raw profile response is checked in.
 
-## Pilot results
+## First pilot results
 
 The person confirmed the website showed an empty basket and approved one 65p ordinary `ea` porridge pot, with target quantities one, two, then zero. Each fresh plan enforced a £1.30 estimated basket ceiling and a maximum quantity of two, using the account's unchanged store context and no booked slot. A private original snapshot and plan files were created with directory mode 0700 and file mode 0600. Those temporary shopping-data files were removed after verified restoration; the normal cached login was retained.
 
@@ -36,7 +36,7 @@ The person approved the same 65p ordinary `ea` pot, SKU `7515858`, with target q
 
 The target-two and repeated-plan steps were not attempted in this pilot. Restoration was within the approved sequence and used a fresh plan after inspecting the actual state. Private snapshots, plans and result files were removed only after verified restoration. Cached authentication was retained.
 
-The cookie fix did not establish dependable live writes. A newly verified login supported preflight reads and planning, then API access was rejected after the first add. Removal after another explicit login did verify successfully, so the failure is intermittent rather than universal. The immediate readback error does not identify its underlying transport/status cause; the subsequent fresh read established authentication rejection. No raw response or credential-bearing trace was retained. These observations do not prove a bot challenge, bearer expiry, missing header or any other cause.
+The cookie fix did not establish dependable live writes. A newly verified login supported preflight reads and planning, then API access was rejected after the first add. Removal after another explicit login did verify successfully, so verification does not fail universally. The failure pattern is not yet characterised. The immediate readback error does not identify its underlying transport/status cause; the subsequent fresh read established authentication rejection. No raw response or credential-bearing trace was retained. These observations do not prove a bot challenge, bearer expiry, missing header or any other cause.
 
 Stop further write experiments here. Before replacing the retained login/HTTP implementation, explain this evidence and compare bounded, read-only requests through the retained HTTP client and the authenticated dedicated browser. Any diagnostic must emit only fixed endpoint labels, status/content-type categories and sanitized schema results. Preserve useful API shapes and dummy fixtures; do not collect HARs or token-bearing headers. Propose the transport change based on that comparison rather than continuing speculative patches.
 
