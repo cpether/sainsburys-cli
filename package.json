@@ -2,28 +2,39 @@
   "name": "sainsburys-cli",
   "version": "0.1.0",
   "type": "module",
-  "description": "Agent-friendly CLI for Sainsbury's Groceries Online — baskets, orders, slots, checkout",
-  "keywords": ["sainsburys", "groceries", "cli", "agent", "automation"],
+  "description": "Personal Sainsbury's basket preparation with manual checkout",
+  "keywords": [
+    "sainsburys",
+    "groceries",
+    "cli",
+    "agent",
+    "automation"
+  ],
   "author": "Yousef Amar",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/yousefamar/sainsburys-cli.git"
+    "url": "git+https://github.com/cpether/sainsburys-cli.git"
   },
-  "homepage": "https://github.com/yousefamar/sainsburys-cli#readme",
-  "bugs": "https://github.com/yousefamar/sainsburys-cli/issues",
+  "homepage": "https://github.com/cpether/sainsburys-cli#readme",
+  "bugs": "https://github.com/cpether/sainsburys-cli/issues",
   "bin": {
     "sainsburys": "./dist/cli/index.js"
   },
-  "files": ["dist", "README.md", "LICENSE", ".env.example"],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    ".env.example"
+  ],
   "scripts": {
-    "build": "tsc",
+    "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc",
     "dev": "tsx src/cli/index.ts",
     "start": "node dist/cli/index.js",
-    "test": "node --import tsx --test test/**/*.test.ts",
+    "test": "node --import ./test/isolate.mjs --import tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "npm run build && npm test",
-    "postinstall": "playwright install chromium || true"
+    "browser:install": "playwright install chromium"
   },
   "dependencies": {
     "commander": "^12.1.0",
@@ -36,6 +47,7 @@
     "typescript": "^5.7.0"
   },
   "engines": {
-    "node": ">=20"
-  }
+    "node": ">=22"
+  },
+  "private": true
 }

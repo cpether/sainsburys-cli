@@ -1,6 +1,7 @@
 import { Command } from "commander";
 import { getProfile, getSlotReservation } from "../../api/customer.js";
-import { buildContext } from "../context.js";
+import { createClient } from "../../client/factory.js";
+import { buildContext, getFormat } from "../context.js";
 import { exitCodeFor, formatMoney, printData, printError, shortDate } from "../output.js";
 
 export function customerCommand(): Command {
@@ -11,7 +12,7 @@ export function customerCommand(): Command {
     .description("Show the logged-in customer's profile")
     .action(async (_opts, cmdRef) => {
       try {
-        const c = await buildContext(cmdRef);
+        const c = {client:await createClient(),format:getFormat(cmdRef)};
         const profile = await getProfile(c.client);
         printData(
           c,
@@ -31,7 +32,7 @@ export function customerCommand(): Command {
     .option("--order-uid <id>", "Look up the slot tied to a specific order")
     .action(async (opts: { orderUid?: string }, cmdRef) => {
       try {
-        const c = await buildContext(cmdRef);
+        const c = {client:await createClient(),format:getFormat(cmdRef)};
         const reservation = await getSlotReservation(c.client, opts.orderUid);
         if (!reservation) {
           printData(c, { reserved: false }, () => "no slot reservation");
@@ -53,5 +54,12 @@ export function customerCommand(): Command {
       }
     });
 
+  cmd.command("context").description("Show the account-derived store and delivery context").action(async (_opts, ref) => {
+    try {
+      const c = await buildContext(ref);
+      const { basketContext, productContext, reservationId, source } = c;
+      printData(c, {basketContext,productContext,reservationId,source},()=>JSON.stringify({basketContext,productContext,reservationId,source},null,2));
+    } catch(err){printError(err);process.exitCode=exitCodeFor(err);}
+  });
   return cmd;
 }

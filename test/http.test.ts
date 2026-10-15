@@ -65,14 +65,14 @@ describe("GroceriesClient.request", () => {
     assert.equal(calls[0]?.method, "GET");
   });
 
-  it("returns undefined on 204 with no body", async () => {
+  it("returns undefined on explicitly allowed 204 with no body", async () => {
     const { fetch } = makeFakeFetch([{ status: 204, body: undefined }]);
     const c = new GroceriesClient({ session: fakeSession(), baseUrl, fetchImpl: fetch });
-    const res = await c.request<unknown>("/x");
+    const res = await c.request<unknown>("/x", { allowEmpty: true });
     assert.equal(res, undefined);
   });
 
-  it("throws ApiError with body on non-2xx (non-auth)", async () => {
+  it("throws ApiError without exposing retailer error content", async () => {
     const { fetch } = makeFakeFetch([{ status: 500, body: { code: "OOPS" } }]);
     const c = new GroceriesClient({ session: fakeSession(), baseUrl, fetchImpl: fetch });
     await assert.rejects(
@@ -80,7 +80,7 @@ describe("GroceriesClient.request", () => {
       (err: unknown) => {
         assert.ok(err instanceof ApiError);
         assert.equal(err.status, 500);
-        assert.deepEqual(err.body, { code: "OOPS" });
+        assert.equal(err.body, undefined);
         return true;
       },
     );

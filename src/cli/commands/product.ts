@@ -17,12 +17,17 @@ function renderProductRow(p: Product): string {
   }${p.name}`;
 }
 
-function ctxFromCli(storeNumber: string, opts: { slotDate?: string; slotType?: string }): ProductQueryContext {
-  return {
-    storeIdentifier: storeNumber,
-    slotDate: opts.slotDate,
-    slotType: (opts.slotType as "delivery" | "collection" | undefined) ?? undefined,
-  };
+function validateSlotOptions(opts: {slotDate?:string;slotType?:string}): void {
+  if (opts.slotType && !["delivery","collection"].includes(opts.slotType)) throw new Error("Slot type must be delivery or collection");
+  if (opts.slotDate && (!/^\d{4}-\d{2}-\d{2}$/.test(opts.slotDate) || !Number.isFinite(Date.parse(opts.slotDate)) || new Date(opts.slotDate).toISOString().slice(0,10) !== opts.slotDate)) throw new Error("Slot date must be a valid YYYY-MM-DD date");
+}
+export function productContextFromOptions(base: ProductQueryContext, opts: {slotDate?:string;slotType?:string}): ProductQueryContext {
+  validateSlotOptions(opts);
+  const ctx = {...base};
+  if ((opts.slotDate && opts.slotDate !== base.slotDate) || (opts.slotType && opts.slotType !== base.slotType)) delete ctx.slotDatetime;
+  if(opts.slotDate)ctx.slotDate=opts.slotDate;
+  if(opts.slotType)ctx.slotType=opts.slotType as "delivery"|"collection";
+  return ctx;
 }
 
 export function productCommand(): Command {
@@ -33,19 +38,18 @@ export function productCommand(): Command {
     .description("Keyword search the catalogue")
     .option("-n, --page-size <n>", "Page size (30|60|90, default 30)", (v) => Number(v), 30)
     .option("-p, --page <n>", "Page number (default 1)", (v) => Number(v), 1)
-    .option("--slot-date <yyyy-mm-dd>", "Slot date for availability/pricing")
-    .option("--slot-type <type>", "delivery|collection")
     .action(
       async (
         query: string[],
-        opts: { pageSize: number; page: number; slotDate?: string; slotType?: string },
+        opts: { pageSize: number; page: number },
         cmdRef,
       ) => {
         try {
+          if (![30,60,90].includes(opts.pageSize) || !Number.isInteger(opts.page) || opts.page<1 || opts.page>1000) throw new Error("Page size must be 30, 60 or 90; page must be 1 to 1000");
           const c = await buildContext(cmdRef);
           const result = await searchProducts(c.client, {
             keyword: query.join(" "),
-            ctx: ctxFromCli(c.storeNumber, opts),
+            ctx: c.productContext,
             pageSize: opts.pageSize,
             pageNumber: opts.page,
           });
@@ -75,10 +79,12 @@ export function productCommand(): Command {
         cmdRef,
       ) => {
         try {
+          validateSlotOptions(opts);
+          if (skus.some(s => !/^\d+$/.test(s)) || skus.length>100) throw new Error("Provide 1 to 100 numeric SKUs");
           const c = await buildContext(cmdRef);
           const result = await getProductsByUid(c.client, {
             uids: skus,
-            ctx: ctxFromCli(c.storeNumber, opts),
+            ctx: productContextFromOptions(c.productContext,opts),
             minimised: opts.minimised,
           });
           printData(c, result, () =>

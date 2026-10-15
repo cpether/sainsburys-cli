@@ -9,17 +9,15 @@ export function authCommand(): Command {
 
   cmd
     .command("login")
-    .description("Run the Playwright login flow and persist a session to disk")
-    .option("--headed", "Show the browser window (overrides SAINSBURYS_HEADED)")
-    .option("--no-persist", "Do not write the session to disk; just verify login works")
+    .description("Open a local browser for manual login and MFA; verify account identity")
+    .option("--headed", "Show the browser window (login is always local and headed)")
+    .option("--no-persist", "Use a temporary browser profile; remove all captured state when finished")
     .action(async (opts: { headed?: boolean; persist: boolean }, cmdRef) => {
       const root = cmdRef.optsWithGlobals();
       const format = root.json ? "json" : "text";
       try {
         const config = loadConfig();
-        const verbose = root.verbose
-          ? (msg: string) => process.stderr.write(`# ${msg}\n`)
-          : undefined;
+        const verbose = (msg: string) => process.stderr.write(`# ${msg}\n`);
         const session = await performLogin({
           config,
           headed: opts.headed,
@@ -31,11 +29,10 @@ export function authCommand(): Command {
           {
             ok: true,
             user_id: session.userId,
-            cookies: session.cookies.length,
             session_path: opts.persist ? config.sessionPath : null,
           },
           () =>
-            `Logged in as user ${session.userId}. Captured ${session.cookies.length} cookies.${
+            `Logged in as user ${session.userId}. Account identity verified.${
               opts.persist ? `\nSaved to ${config.sessionPath}` : ""
             }`,
         );
@@ -69,7 +66,6 @@ export function authCommand(): Command {
           {
             ok: true,
             user_id: session.userId,
-            cookies: session.cookies.length,
             captured_at: new Date(session.capturedAt).toISOString(),
             age_minutes: ageMin,
             session_path: config.sessionPath,
@@ -86,7 +82,7 @@ export function authCommand(): Command {
 
   cmd
     .command("logout")
-    .description("Delete the persisted session")
+    .description("Delete session credentials and persistent browser profiles")
     .action(async (_opts, cmdRef) => {
       const root = cmdRef.optsWithGlobals();
       const format = root.json ? "json" : "text";

@@ -1,0 +1,38 @@
+# Hardening and validation record
+
+Implementation date: 15 October 2026. Fork: https://github.com/cpether/sainsburys-cli. Branch: `harden-personal-shopping`. Base: audited commit `dde7355e8b52aa64583f3ab0516fbcf35f3c45b6`. The original checkout was clean. The fork's main branch matches that commit; no newer upstream changes were included. `upstream` remains the original repository; pushes target the fork's implementation branch only.
+
+## Baseline
+
+Before changes, `npm ci --ignore-scripts`, typecheck, build and all 38 upstream tests passed. Running the existing audit reproduction script reproduced its 23 assertions. Those assertions demonstrate defects and positive controls; they are not security acceptance tests. The original reports remain in the parent shopping workspace. The upstream source and complete historical API notes remain available in Git at the base commit.
+
+The initial dependency audit reported one low-severity esbuild development advisory, [GHSA-g7r4-m6w7-qqqr](https://github.com/advisories/GHSA-g7r4-m6w7-qqqr). Updating compatible Playwright, tsx and Node type versions through the lockfile selected patched esbuild. No major-version audit fix was forced. The silent postinstall browser download was replaced by explicit `browser:install`, which installs the Chromium runtime actually used.
+
+## Acceptance coverage
+
+The automated suite executes application modules and the CLI with dummy credentials, mocked retailer/browser behavior and temporary private homes. Its isolation preloader disables default network access before loading application modules. No ordinary browser profile is read or modified.
+
+| Area | Regression coverage |
+| --- | --- |
+| Storage and identity | Initial permissions, permission rejection, atomic/concurrent writes, malformed sessions, account/path profile separation, verified profile identity, logout of profiles/session/legacy state, no-persist temporary cleanup and cleanup failure |
+| Authentication lifecycle | Concurrent login coalescing, account mismatch, cached login without password, expired session requiring local login, successful/failed timer cleanup, manual MFA only |
+| HTTP | Exact HTTPS origin, unsafe absolute URLs/credentials/fragments, redirect refusal, protected headers, bounded bodies and overall deadlines, cancellation, HTML/challenge/malformed JSON, endpoint validators, shared read refresh, no mutation retry, unknown writes, redacted errors |
+| Basket | Numeric/nested product SKU, sain ID and line ID normalization, finite/unit bounds before requests, existing catchweight preservation, actual account/slot context, explicit store override, expired/malformed reservation, target quantities and repeated/concurrent idempotence |
+| Authority and outcomes | Amendment rejection from both basket and active-order status, snapshot/account/context/price binding, public-hash hostile plan revalidation, enforced quantity/estimated spending limits, per-write readback, unchanged unrelated lines, partial/mismatch/unknown outcomes |
+| Supported CLI | Actual JSON search/basket/plan/apply operations, rejected payment/amendment/booking/additive commands before network, structured failure results and exit codes, no duplicate addition on reapply |
+
+Final checks: clean lockfile install, typecheck, build and 105 automated tests pass. `npm audit --audit-level=low` reports zero vulnerabilities, including development dependencies. CI uses Node 22/24 on Linux/macOS. The local run used Node 25.8.1 on macOS; remote CI results are recorded on the draft PR.
+
+## Independent review
+
+Implementation agents owned separate auth, HTTP and basket modules. The HTTP reviewer independently reviewed authentication and basket plans, and the auth reviewer independently reviewed the other API/context/CLI modules. Material findings fixed and tested include temporary-profile cleanup suppression, trusting a caller-supplied spending estimate, plan deserialization bypasses of unit/catchweight checks, mismatched product identity on sain-only lines, malformed basket readback classified too weakly, conflicting product slot overrides and stale reservation times. A final identifier-shape test covers a new item returned with only nested `product.sain_id`. No material review blocker remained at delivery.
+
+## Limits and next action
+
+Live validation did not happen. The next action is the person's local login in LIVE_VALIDATION.md, followed by comparing identity, context, search and basket with the website. A specific reversible test item/quantity sequence still requires approval. No purchase, amendment or slot booking is authorized.
+
+The undocumented API can change, bot protection may reject replay, and the profile/context schemas may require adjustments after sanitized live observation. A plan is not an atomic retailer transaction. Price changes or a readback failure can leave verified or uncertain partial changes. Weighted fulfillment, substitutions and later website actions prevent a local estimate from guaranteeing the eventual payment amount. Existing catchweight is preserved; new catchweight choices stay on the website. Removal still requires a resolvable product and valid price; otherwise use the website.
+
+No diagnostics are retained: screenshots, HAR capture and browser-page dumps were removed. Private opt-in diagnostic capture would need a separate redaction/retention implementation before introduction. No SMS/chat bridge is supported. There is no automatic reauthentication loop and no payment/amendment/booking execution code.
+
+The approval digest binds plan contents to a review, but does not authenticate a human or isolate the agent. A same-user shell-capable agent can read session state or alter this code. Strong enforcement requires credentials in a separately isolated account/service and an allowlisted interface with an approval channel outside agent control. Local logout cannot revoke copied tokens.

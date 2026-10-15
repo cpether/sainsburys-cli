@@ -1,3 +1,4 @@
+import { record, string, finiteNumber, ValidationError } from "./validation.js";
 import type { GroceriesClient } from "../client/http.js";
 
 export interface AvailableSlot {
@@ -61,6 +62,13 @@ export async function listSlots(
     "/groceries-api/gol-services/slot/v2/slots",
     {
       method: "POST",
+      semanticRead: true,
+      validate: value => {
+        const r=record(value);
+        if(!Array.isArray(r.slots)) throw new ValidationError("Invalid slots");
+        for(const value of r.slots){const s=record(value);string(s.booking_key);for(const k of ["start_time","end_time"]){if(typeof s[k]!=="string" || !Number.isFinite(Date.parse(s[k] as string)))throw new ValidationError("Invalid slot datetime");}if(s.price!==undefined)finiteNumber(s.price);}
+        return r as unknown as SlotsListResponse;
+      },
       headers: { "x-http-method-override": "GET" },
       body: {
         week_number: args.weekNumber ?? 1,
@@ -69,38 +77,6 @@ export async function listSlots(
         is_slot_locked: args.isSlotLocked ?? false,
         store_identifier: args.storeIdentifier,
         delivery_type: args.deliveryType ?? ["1hour"],
-      },
-    },
-  );
-}
-
-export interface BookSlotArgs {
-  bookingKey: string;
-  /** ISO datetime of the new slot's start time. */
-  newSlotDate: string;
-  /** Store number ("2168"). */
-  newStoreNumber: string;
-  changesConfirmed?: boolean;
-}
-
-/**
- * Reserve a slot. Used both for fresh bookings and for changing an existing booking
- * (same endpoint, body has new_slot_date + new_store_number to indicate a change).
- *
- * Important: if used on a placed order to change the slot, the order must first be
- * flipped into amend mode via POST /order/{id}/amend, and the amendment confirmed
- * via the checkout flow afterwards (otherwise the slot change isn't committed).
- */
-export async function bookSlot(client: GroceriesClient, args: BookSlotArgs): Promise<void> {
-  await client.request<void>(
-    "/groceries-api/gol-services/slot/v1/slot/reservation",
-    {
-      method: "POST",
-      body: {
-        booking_key: args.bookingKey,
-        changes_confirmed: args.changesConfirmed ?? false,
-        new_slot_date: args.newSlotDate,
-        new_store_number: args.newStoreNumber,
       },
     },
   );

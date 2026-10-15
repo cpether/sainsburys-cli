@@ -1,51 +1,26 @@
-/**
- * Output helpers. All commands accept a global --json flag; when set, structured
- * data is printed as JSON to stdout. Otherwise human-readable text is printed.
- * Errors always go to stderr; data always goes to stdout. Exit codes are stable
- * so agents can branch on them.
- */
-
+/** JSON stdout carries one result; stderr only carries redacted human errors. */
 export type Format = "json" | "text";
-
-export interface OutputContext {
-  format: Format;
+export interface OutputContext { format: Format; }
+export function printData(ctx:OutputContext,data:unknown,textFn:()=>string):void {
+  process.stdout.write((ctx.format==="json"?JSON.stringify(data,null,2):textFn())+"\n");
 }
-
-export function printData(ctx: OutputContext, data: unknown, textFn: () => string): void {
-  if (ctx.format === "json") {
-    process.stdout.write(JSON.stringify(data, null, 2) + "\n");
-  } else {
-    process.stdout.write(textFn() + "\n");
-  }
-}
-
-export function printText(ctx: OutputContext, text: string): void {
-  if (ctx.format === "json") return; // suppress chatter in JSON mode
-  process.stdout.write(text + "\n");
-}
-
-export function printError(err: unknown): void {
-  if (err instanceof Error) {
-    process.stderr.write(`error: ${err.message}\n`);
-  } else {
-    process.stderr.write(`error: ${String(err)}\n`);
-  }
-}
-
-export function exitCodeFor(err: unknown): number {
-  if (err && typeof err === "object" && "name" in err) {
-    if ((err as { name: string }).name === "AuthError") return 2;
-    if ((err as { name: string }).name === "ApiError") return 3;
-  }
+export function printText(ctx:OutputContext,text:string):void { if(ctx.format!=="json")process.stdout.write(text+"\n"); }
+export function exitCodeFor(err:unknown):number {
+  const name=err instanceof Error?err.name:"";
+  if(name==="AuthError")return 2;
+  if(name==="UnknownOutcomeError" || name==="BasketApplyError")return 5;
+  if(["ApiError","ResponseValidationError","RequestTimeoutError","RequestCancelledError","ValidationError"].includes(name))return 3;
   return 1;
 }
-
-export function formatMoney(value: number | undefined): string {
-  if (value === undefined || value === null) return "-";
-  return `£${value.toFixed(2)}`;
+export function printError(err:unknown):void {
+  const message=err instanceof Error?err.message:"Operation failed";
+  if(process.argv.includes("--json")) {
+    const detail = err && typeof err === "object" ? err as Record<string,unknown> : {};
+    process.stdout.write(JSON.stringify({ok:false,error:{code:err instanceof Error?err.name:"Error",message},
+      ...(detail.outcome ? {outcome:detail.outcome} : exitCodeFor(err)===5 ? {outcome:"unknown"} : {}),
+      ...(typeof detail.verifiedChanges === "number" ? {verifiedChanges:detail.verifiedChanges} : {})})+"\n");
+  }
+  else process.stderr.write(`error: ${message}\n`);
 }
-
-export function shortDate(iso: string | undefined): string {
-  if (!iso) return "-";
-  return iso.replace("T", " ").replace(/Z$/, " UTC");
-}
+export function formatMoney(value:number|undefined):string {return value===undefined||value===null?"-":`£${value.toFixed(2)}`;}
+export function shortDate(iso:string|undefined):string {return iso?iso.replace("T"," ").replace(/Z$/," UTC"):"-";}
