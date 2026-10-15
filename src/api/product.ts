@@ -103,6 +103,7 @@ export function parseProducts(value: unknown): ProductListResponse {
     const p = record(value);
     const product_uid = identifier(p.product_uid ?? p.sku);
     if (!/^\d+$/.test(product_uid)) throw new ValidationError("Invalid product SKU");
+    if (p.sku !== undefined && identifier(p.sku) !== product_uid) throw new ValidationError("conflicting product SKUs");
     const name = string(p.name);
     if (p.is_available !== undefined && typeof p.is_available !== "boolean") throw new ValidationError("Invalid availability");
     if (p.retail_price !== undefined) {

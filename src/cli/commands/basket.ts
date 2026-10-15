@@ -25,9 +25,9 @@ async function readJson(path: string): Promise<unknown> {
     return JSON.parse(await file.readFile("utf8"));
   } finally { await file.close(); }
 }
-function fail(error: unknown): never {
+function fail(error: unknown): void {
   printError(error);
-  process.exit(exitCodeFor(error));
+  process.exitCode = exitCodeFor(error);
 }
 export function basketCommand(): Command {
   const cmd = new Command("basket").description("Inspect, review and apply target quantities; checkout stays on the website");

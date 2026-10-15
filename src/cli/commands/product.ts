@@ -14,7 +14,7 @@ function renderProductRow(p: Product): string {
   const unit = p.unit_price ? `${formatMoney(p.unit_price.price)}/${p.unit_price.measure}` : "";
   return `${p.product_uid.padEnd(8)} ${formatMoney(price).padStart(7)} ${unit.padEnd(14)} ${
     p.is_available === false ? "[oos] " : "      "
-  }${p.name}`;
+  }${JSON.stringify(p.name)}`;
 }
 
 function validateSlotOptions(opts: {slotDate?:string;slotType?:string}): void {
@@ -61,7 +61,7 @@ export function productCommand(): Command {
           });
         } catch (err) {
           printError(err);
-          process.exit(exitCodeFor(err));
+          process.exitCode = exitCodeFor(err);
         }
       },
     );
@@ -92,7 +92,7 @@ export function productCommand(): Command {
           );
         } catch (err) {
           printError(err);
-          process.exit(exitCodeFor(err));
+          process.exitCode = exitCodeFor(err);
         }
       },
     );
@@ -107,7 +107,7 @@ export function productCommand(): Command {
         printData(c, result, () => (result.length ? result.join("\n") : "(no suggestions)"));
       } catch (err) {
         printError(err);
-        process.exit(exitCodeFor(err));
+        process.exitCode = exitCodeFor(err);
       }
     });
 

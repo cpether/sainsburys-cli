@@ -1,11 +1,5 @@
-import { config as loadEnv } from "dotenv";
-import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-
-const globalEnvPath = join(homedir(), ".config", "sainsburys", ".env");
-if (existsSync(globalEnvPath)) loadEnv({ path: globalEnvPath });
-loadEnv();
 
 export interface Config {
   email: string;

@@ -39,6 +39,26 @@ describe("basket api", () => {
     assert.equal(JSON.parse(calls[1]!.body!).items[0].decreasing_quantity, true);
     assert.equal(JSON.parse(calls[1]!.body!).items[0].uom, "kg");
   });
+  it("accepts the observed JSON null basket-write response", async () => {
+    const { c } = clientWith([{ body: null }, { body: null }, { body: null }]);
+    await addItem(c, {storeNumber:"2168"}, {productUid:"1234"});
+    await updateItems(c, {storeNumber:"2168"}, [{productUid:"1234",itemUid:"5678",quantity:2}]);
+    await removeItem(c, {storeNumber:"2168"}, {productUid:"1234",itemUid:"5678"});
+  });
+  it("rejects malformed basket data with the structured response error", async () => {
+    const { c } = clientWith([{ body: {items:[]} }]);
+    await assert.rejects(getBasket(c,{storeNumber:"2168"}), {name:"ResponseValidationError"});
+  });
+  it("rejects scalar basket-write acknowledgements as unknown outcomes", async () => {
+    const { c } = clientWith([{ body: true }]);
+    await assert.rejects(addItem(c,{storeNumber:"2168"},{productUid:"1234"}), {name:"UnknownOutcomeError"});
+  });
+  it("rejects conflicting numeric product identifiers instead of picking one", async () => {
+    let { c } = clientWith([{ body: {basket_id:"1",is_in_amend_mode:false,total_price:2,items:[{item_uid:"2",quantity:1,uom:"ea",product:{sku:"1234",product_uid:"5678"}}]} }]);
+    await assert.rejects(getBasket(c,{storeNumber:"2168"}),{name:"ResponseValidationError"});
+    ({c}=clientWith([{body:{products:[{product_uid:"1234",sku:"5678",name:"Conflict"}]}}]));
+    await assert.rejects(getProductsByUid(c,{uids:["1234"],ctx:{storeIdentifier:"2168"}}),{name:"ResponseValidationError"});
+  });
   it("invalid write quantities fail before sending anything", async () => {
     const { c, calls } = clientWith([]);
     for (const quantity of [NaN,Infinity,-1,1.5,100]) await assert.rejects(addItem(c,{storeNumber:"2168"},{productUid:"1234",quantity}));

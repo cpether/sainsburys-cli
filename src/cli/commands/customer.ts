@@ -22,7 +22,7 @@ export function customerCommand(): Command {
         );
       } catch (err) {
         printError(err);
-        process.exit(exitCodeFor(err));
+        process.exitCode = exitCodeFor(err);
       }
     });
 
@@ -50,7 +50,7 @@ export function customerCommand(): Command {
         );
       } catch (err) {
         printError(err);
-        process.exit(exitCodeFor(err));
+        process.exitCode = exitCodeFor(err);
       }
     });
 

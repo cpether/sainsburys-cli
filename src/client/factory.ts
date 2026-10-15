@@ -20,9 +20,3 @@ export async function createClient(opts: CreateClientOptions = {}): Promise<Groc
   }
   return new GroceriesClient({ session, baseUrl: config.baseUrl });
 }
-
-export function inferStoreNumber(client: GroceriesClient, override?: string): string {
-  const store = override ?? process.env.SAINSBURYS_STORE_NUMBER ?? client.getSession().storeNumber;
-  if (!store) throw new Error("Account store is unknown. Inspect delivery context or provide an explicit --store override.");
-  return store;
-}

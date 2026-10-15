@@ -1,5 +1,6 @@
 import type { GroceriesClient } from "../client/http.js";
 import type { Basket, BasketItem } from "./types.js";
+import { identifier } from "./validation.js";
 
 export interface BasketContext {
   pickTime?: string;
@@ -9,9 +10,11 @@ export interface BasketContext {
 const BASE = "/groceries-api/gol-services/basket/v2/basket";
 
 export function normalizeIdentifier(value: unknown, label = "identifier"): string {
-  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) return String(value);
-  if (typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value)) return value;
-  throw new Error(`Invalid ${label}`);
+  let result: string;
+  try { result = identifier(value, label); }
+  catch { throw new Error(`Invalid ${label}`); }
+  if (result.length > 128) throw new Error(`Invalid ${label}`);
+  return result;
 }
 
 export function validateQuantity(quantity: number, uom: string): void {
@@ -50,6 +53,7 @@ export function normalizeBasket(value: unknown): Basket {
     for (const key of ["product_uid", "sain_id", "item_uid"] as const) {
       if (i[key] !== undefined) line[key] = normalizeIdentifier(i[key], key);
     }
+    productUid(line); // Reject conflicting numeric IDs before returning retailer data.
     if (!line.item_uid || !itemIdentifiers(line).length) throw new Error("Invalid basket line identifiers");
     for (const price of [line.subtotal_price, line.sub_total]) {
       if (price !== undefined && (!Number.isFinite(price) || price < 0)) throw new Error("Invalid basket line price");
@@ -61,14 +65,16 @@ export function normalizeBasket(value: unknown): Basket {
 }
 
 export function itemIdentifiers(item: BasketItem): string[] {
-  return [item.product?.sku, item.product?.product_uid, item.product_uid, item.sain_id, item.product?.sainId, item.product?.sain_id, item.item_uid]
+  return [item.product?.sku, item.product?.product_uid, item.product_uid, item.sain_id, item.product?.sainId, item.product?.sain_id]
     .filter((v) => v !== undefined).map((v) => normalizeIdentifier(v));
 }
 
 export function productUid(item: BasketItem): string | undefined {
-  return [item.product?.sku, item.product?.product_uid, item.product_uid]
-    .map((v) => v === undefined ? undefined : normalizeIdentifier(v))
-    .find((v) => v !== undefined && /^\d+$/.test(v));
+  const values = [item.product?.sku, item.product?.product_uid, item.product_uid]
+    .map((value) => value === undefined ? undefined : normalizeIdentifier(value))
+    .filter((value): value is string => value !== undefined && /^\d+$/.test(value));
+  if (new Set(values).size > 1) throw new Error("Conflicting numeric product SKUs");
+  return values[0];
 }
 
 function basketQuery(ctx: BasketContext, extra: Record<string, string | boolean> = {}): Record<string, string | boolean> {
@@ -78,7 +84,7 @@ function basketQuery(ctx: BasketContext, extra: Record<string, string | boolean>
 }
 
 export async function getBasket(client: GroceriesClient, ctx: BasketContext): Promise<Basket> {
-  return normalizeBasket(await client.request<unknown>(BASE, { query: basketQuery(ctx, { calculate: true }) }));
+  return client.request<Basket>(BASE, { query: basketQuery(ctx, { calculate: true }), validate: normalizeBasket });
 }
 
 export interface AddItemArgs { productUid: string; quantity?: number; uom?: string; selectedCatchweight?: string }
@@ -93,17 +99,23 @@ function writeValues(args: AddItemArgs): { product_uid: string; quantity: number
   return { product_uid: uid, quantity, uom, selected_catchweight: selected };
 }
 
+/** Write acknowledgements carry no success authority; the workflow always reads back. */
+function validateWriteAcknowledgement(value: unknown): void {
+  if (value === undefined || value === null) return;
+  object(value);
+}
+
 /** Low-level protocol operation. Agent CLI mutations must use the approved-plan workflow. */
 export async function addItem(client: GroceriesClient, ctx: BasketContext, args: AddItemArgs): Promise<void> {
   const body = writeValues(args);
   if (!body.quantity) throw new Error("Adding zero quantity is invalid");
-  await client.request<unknown>(`${BASE}/item`, { method: "POST", query: basketQuery(ctx), body, allowEmpty: true });
+  await client.request<unknown>(`${BASE}/item`, { method: "POST", query: basketQuery(ctx), body, allowEmpty: true, validate: validateWriteAcknowledgement });
 }
 export interface UpdateItemArgs extends AddItemArgs { itemUid: string; quantity: number; decreasingQuantity?: boolean }
 export async function updateItems(client: GroceriesClient, ctx: BasketContext, items: UpdateItemArgs[]): Promise<void> {
   if (!items.length) throw new Error("No basket updates supplied");
   const body = { items: items.map((i) => ({ ...writeValues(i), item_uid: normalizeIdentifier(i.itemUid, "basket line ID"), ...(i.decreasingQuantity ? { decreasing_quantity: true } : {}) })) };
-  await client.request<unknown>(BASE, { method: "PUT", query: basketQuery(ctx), body, allowEmpty: true });
+  await client.request<unknown>(BASE, { method: "PUT", query: basketQuery(ctx), body, allowEmpty: true, validate: validateWriteAcknowledgement });
 }
 export async function removeItem(client: GroceriesClient, ctx: BasketContext, args: { productUid: string; itemUid: string; uom?: string; selectedCatchweight?: string }): Promise<void> {
   return updateItems(client, ctx, [{ ...args, quantity: 0, decreasingQuantity: true }]);
@@ -114,15 +126,5 @@ export function findItemBySku(basket: Basket, sku: string): BasketItem | undefin
   if (matches.length > 1) throw new Error("Ambiguous product identifier; multiple basket lines match");
   return matches[0];
 }
-export async function findItemBySkuViaLookup(client: GroceriesClient, basket: Basket, sku: string, storeNumber: string): Promise<BasketItem | undefined> {
-  const direct = findItemBySku(basket, sku);
-  if (direct) return direct;
-  const res = await client.request<{ products: Record<string, unknown>[] }>("/groceries-api/gol-services/product/v1/product", { query: { uids: normalizeIdentifier(sku), store_identifier: storeNumber, minimised: true } });
-  if (!res || !Array.isArray(res.products)) throw new Error("Invalid product lookup response");
-  const p = res.products[0];
-  const sainId = p?.sainId ?? p?.sain_id;
-  return sainId === undefined ? undefined : findItemBySku(basket, normalizeIdentifier(sainId));
-}
-
 /** Numeric product SKU used for availability requests. */
 export const productSku = productUid;

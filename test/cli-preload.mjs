@@ -24,7 +24,7 @@ globalThis.fetch = async (input, init) => {
     body=basket;
   }
   else if(url.pathname.endsWith('/basket'))body={basket_id:'basket-1',is_in_amend_mode:false,total_price:0,subtotal_price:0,minimum_spend:25,item_count:0,items:[]};
-  else if(url.pathname.endsWith('/product'))body={products:[{product_uid:'12345',name:'Dummy product',is_available:true,retail_price:{price:2}}]};
+  else if(url.pathname.endsWith('/product'))body={products:[{product_uid:'12345',name:'Dummy product',is_available:true,retail_price:{price:2,measure:'ea'}}]};
   else throw new Error('Unexpected fake request');
   if(process.env.TEST_RESPONSE==='html')return new Response('<html>secret challenge</html>',{headers:{'content-type':'text/html'}});
   return new Response(JSON.stringify(body),{headers:{'content-type':'application/json'}});

@@ -38,7 +38,7 @@ export function authCommand(): Command {
         );
       } catch (err) {
         printError(err);
-        process.exit(exitCodeFor(err));
+        process.exitCode = exitCodeFor(err);
       }
     });
 
@@ -76,7 +76,7 @@ export function authCommand(): Command {
         );
       } catch (err) {
         printError(err);
-        process.exit(exitCodeFor(err));
+        process.exitCode = exitCodeFor(err);
       }
     });
 
@@ -92,7 +92,7 @@ export function authCommand(): Command {
         printData({ format }, { ok: true }, () => `Cleared ${config.sessionPath}`);
       } catch (err) {
         printError(err);
-        process.exit(exitCodeFor(err));
+        process.exitCode = exitCodeFor(err);
       }
     });
 

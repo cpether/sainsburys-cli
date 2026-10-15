@@ -18,6 +18,8 @@ node dist/cli/index.js auth login
 
 The login opens a dedicated, headed Playwright Chromium window. Complete login and MFA yourself in that window. The CLI never asks for a password or MFA code and does not read `SAINSBURYS_PASSWORD`. It verifies the live profile's email and user ID before saving the captured session. No ordinary Chrome profile is used. The downloaded Chromium is the browser the application actually launches; system Chrome is unnecessary.
 
+Configuration comes only from exported environment variables. `.env.example` is a reference; neither the current directory nor the global config directory has a `.env` file loaded automatically.
+
 The default private state directory is `~/.config/sainsburys`. Use `SAINSBURYS_SESSION_PATH=/absolute/private/directory/session.json` to separate installations. The directory must be owned by you and mode 0700. Session files are mode 0600 from creation and atomically replaced. An existing directory with permissive permissions causes a clear error; inspect it and correct its permissions locally. Account email and session path determine the dedicated browser profile. Browser/profile use and session replacement are locked across processes.
 
 ```sh
@@ -26,9 +28,9 @@ node dist/cli/index.js auth logout
 node dist/cli/index.js auth login --no-persist
 ```
 
-Logout deletes the local session, its account profiles and the old version's shared `browser-data` profile. It does not revoke tokens someone already copied or delete an old plaintext `.env` password; remove any such password locally. `--no-persist` creates and removes a fresh temporary browser profile, writes no cached session and does not reuse an existing profile. It is a login check, not an agent session.
+Logout deletes the local session and its account profiles. The old version's shared `browser-data` profile is removed automatically only in the known default config directory. If that folder exists next to a custom session path, logout reports incomplete cleanup and asks you to verify its ownership before removing it. It does not revoke tokens someone already copied or delete an old plaintext `.env` password; remove any such password locally. `--no-persist` creates and removes a fresh temporary browser profile, writes no cached session and does not reuse an existing profile. It is a login check, not an agent session.
 
-Agent operations reuse the cached session without a retained password or automatic browser login. On expiry, run local `auth login` again. If a process was killed while holding a lock, close all shopping/login processes before removing the specific stale `.lock` file named by the error.
+Agent operations reuse the cached session without a retained password or automatic browser login. On expiry, run local `auth login` again. Ctrl-C and SIGTERM abort active requests, close the dedicated browser and release local locks. Locks owned by a dead process are reclaimed automatically. A SIGKILL or power loss cannot run cleanup; the next `auth logout` removes recognized abandoned temporary profiles for that session path. Live or unrecognized lock/profile owners fail closed. Inspect such errors rather than deleting a live process's state. Interrupted writes still require basket inspection.
 
 ## Prepare a basket
 
@@ -66,13 +68,13 @@ An AI should present the plan and wait for your approval before invoking apply. 
 
 Plans set target quantities. Reapplying an already satisfied plan makes no further additions. The workflow checks account, context, original basket and prices, enforces the maximum basket total and per-line quantity, rejects amendments, then reads back each mutation. If another line changes, a target differs, verification fails or an outcome is uncertain, it stops and returns an error. A multi-item plan is not a retailer transaction and may stop after some verified changes. Inspect the basket and create a fresh review before recovery; ambiguous writes are never automatically retried. Prices, promotions and catchweight totals remain estimates until the retailer calculates them. A spending limit cannot guarantee the final amount after substitutions, weighed fulfillment or website checkout changes.
 
-Quantities must be finite and supported by unit. Counts use whole items, kilograms can use fractions. Conservative per-unit bounds and explicit plan constraints cap mistakes. Unsupported units fail closed. Plans and outputs can contain personal shopping data; store and share them accordingly.
+Quantities must be finite and supported by unit. Counts use whole items, kilograms can use fractions. New lines must match the product's sold-by unit; a missing or unknown unit requires website review. Conservative per-unit bounds and explicit plan constraints cap mistakes. Unsupported units fail closed. Plans and outputs can contain personal shopping data; store and share them accordingly.
 
 Finish by reviewing the trolley, coupons, delivery reservation, substitutions and final amount on the website, and pay there yourself. Coupon lookups propagate errors; coupon application is manual on the website.
 
 ## Output and trust boundary
 
-Global `--json` emits one JSON result to stdout, including errors. Exit codes are 0 for success, 1 for input/stale-plan/policy failures, 2 for required authentication, 3 for API/response/deadline failure, 4 for no saved session in `auth status`, and 5 for uncertain or partially applied basket operations. Treat every nonzero apply result as requiring inspection before further writes.
+Global `--json` emits one JSON result to stdout, including errors. Exit codes are 0 for success, 1 for input/stale-plan/policy failures, 2 for required authentication, 3 for API/response/deadline failure, 4 for no saved session in `auth status`, and 5 for uncertain or partially applied basket operations. Graceful SIGINT/SIGTERM exits use 130/143 after cleanup. Treat every nonzero apply result as requiring inspection before further writes.
 
 Authenticated requests are confined to `https://www.sainsburys.co.uk`, redirects are refused, response reads have deadlines/size limits and endpoint schemas validate responses. No screenshots, HARs, browser URLs, automatic diagnostics or SMS chat bridge are produced. Errors omit raw HTTP bodies and browser errors. Chromium's normal site isolation remains enabled.
 

@@ -75,6 +75,20 @@ describe("private authentication storage", () => {
     await assert.rejects(loadSession(path), /invalid shape/);
   }));
 
+  it("does not delete an unknown legacy profile beside a custom session file", () => temporary(async (dir) => {
+    const path = join(dir, "session.json");
+    const legacy = join(dir, "browser-data");
+    await saveSession(path, fakeSession());
+    await mkdir(legacy);
+    await writeFile(join(legacy, "unrelated"), "preserve");
+    await assert.rejects(clearSession(path), /Logout is incomplete/);
+    assert.equal(await readFile(join(legacy, "unrelated"), "utf8"), "preserve");
+    assert.ok(await loadSession(path));
+    await rm(legacy, {recursive:true});
+    await clearSession(path);
+    assert.equal(await loadSession(path), null);
+  }));
+
   it("reports a busy lock without modifying another writer's lock", () => temporary(async (dir) => {
     const path = join(dir, "busy.lock");
     await writeFile(path, "other", { mode: 0o600 });
@@ -89,13 +103,11 @@ describe("private authentication storage", () => {
     assert.equal(browserDataDir(path, "A@EXAMPLE.COM"), browserDataDir(path, "a@example.com"));
     await mkdir(browserDataDir(path, "a@example.com"), { recursive: true, mode: 0o700 });
     await mkdir(browserDataDir(path, "b@example.com"), { recursive: true, mode: 0o700 });
-    await mkdir(join(dir, "browser-data"));
     await saveSession(path, fakeSession());
     await clearSession(path);
     await clearSession(path);
     assert.equal(await loadSession(path), null);
     await assert.rejects(stat(profileRoot(path)), { code: "ENOENT" });
-    await assert.rejects(stat(join(dir, "browser-data")), { code: "ENOENT" });
   }));
 });
 

@@ -21,11 +21,19 @@ The automated suite executes application modules and the CLI with dummy credenti
 | Authority and outcomes | Amendment rejection from both basket and active-order status, snapshot/account/context/price binding, public-hash hostile plan revalidation, enforced quantity/estimated spending limits, per-write readback, unchanged unrelated lines, partial/mismatch/unknown outcomes |
 | Supported CLI | Actual JSON search/basket/plan/apply operations, rejected payment/amendment/booking/additive commands before network, structured failure results and exit codes, no duplicate addition on reapply |
 
-Final checks: clean lockfile install, typecheck, build and 105 automated tests pass. `npm audit --audit-level=low` reports zero vulnerabilities, including development dependencies. CI uses Node 22/24 on Linux/macOS. The local run used Node 25.8.1 on macOS; remote CI results are recorded on the draft PR.
+Final checks: clean lockfile install, typecheck, build and 130 automated tests pass. `npm audit --audit-level=low` reports zero vulnerabilities, including development dependencies. CI uses Node 22/24 on Linux/macOS. The local run used Node 25.8.1 on macOS; remote CI results are recorded on the draft PR.
 
 ## Independent review
 
 Implementation agents owned separate auth, HTTP and basket modules. The HTTP reviewer independently reviewed authentication and basket plans, and the auth reviewer independently reviewed the other API/context/CLI modules. Material findings fixed and tested include temporary-profile cleanup suppression, trusting a caller-supplied spending estimate, plan deserialization bypasses of unit/catchweight checks, mismatched product identity on sain-only lines, malformed basket readback classified too weakly, conflicting product slot overrides and stale reservation times. A final identifier-shape test covers a new item returned with only nested `product.sain_id`. No material review blocker remained at delivery.
+
+### Claude PR review
+
+The requested external review runs through the authenticated Claude CLI with `--model claude-opus-5-5 --effort high`. Its first pass found product/line-ID confusion, readback aliases that could misclassify a valid add, stale locks preventing logout after interruption, a missing new-product unit check, and JSON-null/schema error inconsistencies. All have regression coverage and fixes. Follow-up verdicts and final CI status are recorded in the PR.
+
+The fixes also reconcile aliases when choosing an existing line for update, reject contradictory numeric identifiers, preserve idempotence across the observed response shapes, reclaim dead-process locks without deleting a new live claim, clean abandoned temporary authentication state on logout, abort HTTP on graceful signals, and let CLI cleanup finish before exit. SIGKILL/power loss still cannot execute immediate cleanup. Unknown live lock owners fail closed.
+
+The Standards review's confirmed product/line-ID defect and two duplication concerns were resolved. Automatic dotenv loading, terminal control sequences in retailer text, and deletion of an unverified legacy folder beside a custom session path were also addressed. The HTTP client's tested read-refresh seam remains available as a library feature; the agent CLI still requires explicit local login. Policy/input failures retain the documented exit code 1.
 
 ## Limits and next action
 

@@ -5,6 +5,7 @@ import { launchContext, type LaunchOptions } from "./browser.js";
 import { type Session, type SessionCookie, parseWcauthtoken, saveSession, withAuthLock } from "./session.js";
 import { GroceriesClient } from "../client/http.js";
 import { MFA_INSTRUCTIONS } from "./mfa-providers.js";
+import { registerCleanup, throwIfInterrupted } from "./lifecycle.js";
 
 export interface LoginOptions {
   config: Config;
@@ -51,6 +52,7 @@ async function login(opts: LoginOptions): Promise<Session> {
   if (config.baseUrl !== ORIGIN) throw new Error("Login is restricted to the Sainsbury's HTTPS origin.");
   const run = async () => {
     const session = await captureLogin(opts, email, log);
+    throwIfInterrupted();
     if (opts.persist !== false) await saveSession(config.sessionPath, session);
     return session;
   };
@@ -62,8 +64,12 @@ async function captureLogin(opts: LoginOptions, email: string, log: (msg: string
   const context = await (opts.launch ?? launchContext)({
     sessionPath: config.sessionPath, accountEmail: email, headless: false, persist: opts.persist,
   });
+  let closing: Promise<void> | undefined;
+  const close = () => closing ??= context.close();
+  const unregister = registerCleanup(close);
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
+    throwIfInterrupted();
     const page = await context.newPage();
     let wcauthtoken: string | undefined;
     let bearerToken: string | undefined;
@@ -149,9 +155,11 @@ async function captureLogin(opts: LoginOptions, email: string, log: (msg: string
   } finally {
     if (timer) clearTimeout(timer);
     // Browser errors can include URLs and page contents. Do not expose those details.
-    await context.close().catch(() => {
-      throw new LocalLoginError("Could not close the login browser or clean its temporary profile. Close it locally and inspect private authentication storage before retrying.");
-    });
+    try {
+      await close().catch(() => {
+        throw new LocalLoginError("Could not close the login browser or clean its temporary profile. Close it locally and inspect private authentication storage before retrying.");
+      });
+    } finally { unregister(); }
   }
 }
 

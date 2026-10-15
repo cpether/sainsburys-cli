@@ -1,4 +1,5 @@
 import { cookieHeader, type Session } from "../auth/session.js";
+import { interruptionSignal } from "../auth/lifecycle.js";
 import { ENABLED_FEATURE_FLAGS } from "../lib/feature-flags.js";
 
 export const RETAILER_ORIGIN = "https://www.sainsburys.co.uk";
@@ -110,7 +111,8 @@ export class GroceriesClient {
         throw new Error("Read semantics are only allowed for the known slot inspection endpoint.");
       }
     }
-    if (opts.signal?.aborted) throw new RequestCancelledError();
+    const signal = opts.signal ? AbortSignal.any([opts.signal, interruptionSignal()]) : interruptionSignal();
+    if (signal.aborted) throw new RequestCancelledError();
     const controller = new AbortController();
     let attemptedMutation = false;
     let timedOut = false;
@@ -122,7 +124,7 @@ export class GroceriesClient {
     };
     const timer = setTimeout(() => { timedOut = true; cancel(); }, timeoutMs);
     const onAbort = () => cancel();
-    opts.signal?.addEventListener("abort", onAbort, { once: true });
+    signal.addEventListener("abort", onAbort, { once: true });
     try {
       return await Promise.race([
         this.requestInternal(url, opts, controller.signal, maxBytes, isRead, false, () => { attemptedMutation = true; }),
@@ -136,7 +138,7 @@ export class GroceriesClient {
       throw error;
     } finally {
       clearTimeout(timer);
-      opts.signal?.removeEventListener("abort", onAbort);
+      signal.removeEventListener("abort", onAbort);
     }
   }
 

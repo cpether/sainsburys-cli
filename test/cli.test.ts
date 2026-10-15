@@ -6,13 +6,13 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fakeSession } from "./_helpers.js";
 
-function run(args:string[], options:{session?:boolean;html?:boolean}={}) {
+function run(args:string[], options:{session?:boolean;html?:boolean;store?:string}={}) {
   const home=mkdtempSync(join(tmpdir(),"sainsburys-cli-test-"));
   const session=join(home,"session.json"),log=join(home,"requests.jsonl");
   if(options.session)writeFileSync(session,JSON.stringify(fakeSession({accountEmail:"dummy@example.invalid"})),{mode:0o600});
   writeFileSync(log,"");
   const result=spawnSync(process.execPath,["--import","tsx","--import",resolve("test/cli-preload.mjs"),resolve("src/cli/index.ts"),...args],{
-    encoding:"utf8",timeout:5000,cwd:process.cwd(),env:{PATH:process.env.PATH,HOME:home,SAINSBURYS_SESSION_PATH:session,SAINSBURYS_EMAIL:"dummy@example.invalid",TEST_REQUEST_LOG:log,...(options.html?{TEST_RESPONSE:"html"}:{})},
+    encoding:"utf8",timeout:5000,cwd:process.cwd(),env:{PATH:process.env.PATH,HOME:home,SAINSBURYS_SESSION_PATH:session,SAINSBURYS_EMAIL:"dummy@example.invalid",TEST_REQUEST_LOG:log,...(options.store?{SAINSBURYS_STORE_NUMBER:options.store}:{}),...(options.html?{TEST_RESPONSE:"html"}:{})},
   });
   const requests=readFileSync(log,"utf8").trim().split("\n").filter(Boolean).map(JSON.parse);
   rmSync(home,{recursive:true,force:true});return {...result,requests};
@@ -33,6 +33,11 @@ test("missing session gives authentication exit and one JSON result without secr
 test("JSON basket and search execute actual implementation against mocked retailer",()=>{
   let r=run(["--json","basket","show"],{session:true});assert.equal(r.status,0,r.stdout+r.stderr);const basket=JSON.parse(r.stdout);assert.ok(basket.items??basket.basket?.items);assert.equal(r.stderr,"");
   r=run(["--json","product","search","dummy"],{session:true});assert.equal(r.status,0,r.stdout+r.stderr);assert.equal(JSON.parse(r.stdout).products[0].product_uid,"12345");
+});
+test("explicit environment store overrides account context",()=>{
+  const r=run(["--json","customer","context"],{session:true,store:"9876"});
+  assert.equal(r.status,0,r.stdout+r.stderr);
+  assert.equal(JSON.parse(r.stdout).basketContext.storeNumber,"9876");
 });
 test("HTML challenge exits nonzero with structured redacted error",()=>{
   const r=run(["--json","basket","show"],{session:true,html:true});assert.equal(r.status,3);assert.equal(JSON.parse(r.stdout).ok,false);assert.doesNotMatch(r.stdout+r.stderr,/secret challenge|<html>/);
@@ -64,4 +69,16 @@ test("invalid CLI plan quantity fails before account or retailer requests",()=>{
     const r=spawnSync(process.execPath,["--import","tsx","--import",resolve("test/cli-preload.mjs"),resolve("src/cli/index.ts"),"--json","basket","plan",targets,"--max-total","10","--max-quantity","2","--out",join(home,"plan.json")],{encoding:"utf8",timeout:5000,env:{PATH:process.env.PATH,HOME:home,SAINSBURYS_SESSION_PATH:join(home,"none"),TEST_REQUEST_LOG:log}});
     assert.equal(r.status,1);assert.equal(JSON.parse(r.stdout).ok,false);assert.equal(readFileSync(log,"utf8"),"");
   }finally{rmSync(home,{recursive:true,force:true});}
+});
+
+test("working-directory dotenv files cannot redirect the store or session",()=>{
+  const home=mkdtempSync(join(tmpdir(),"sainsburys-cli-cwd-"));
+  try {
+    const session=join(home,"session.json");
+    writeFileSync(session,JSON.stringify(fakeSession({accountEmail:"dummy@example.invalid"})),{mode:0o600});
+    writeFileSync(join(home,".env"),'SAINSBURYS_STORE_NUMBER=9999\n');
+    const r=spawnSync(process.execPath,["--import",import.meta.resolve("tsx"),"--import",resolve("test/cli-preload.mjs"),resolve("src/cli/index.ts"),"--json","customer","context"],{encoding:"utf8",timeout:5000,cwd:home,env:{PATH:process.env.PATH,HOME:home,SAINSBURYS_EMAIL:"dummy@example.invalid",SAINSBURYS_SESSION_PATH:session}});
+    assert.equal(r.status,0,r.stdout+r.stderr);
+    assert.equal(JSON.parse(r.stdout).basketContext.storeNumber,"0123");
+  } finally {rmSync(home,{recursive:true,force:true});}
 });

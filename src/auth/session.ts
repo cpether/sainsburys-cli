@@ -1,5 +1,7 @@
-import { mkdir, readFile, unlink, lstat, open, rename, rm } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { mkdir, readFile, unlink, lstat, open, rename, rm, readdir, rmdir } from "node:fs/promises";
+import { dirname, basename, join, resolve } from "node:path";
+import { tmpdir, homedir } from "node:os";
+import { registerCleanup, throwIfInterrupted } from "./lifecycle.js";
 import { createHash, randomUUID } from "node:crypto";
 
 export interface SessionCookie {
@@ -35,27 +37,120 @@ export async function privateDirectory(path: string): Promise<void> {
   }
 }
 
-/** Cross-process exclusive lock. Stale locks fail clearly rather than risking concurrent writes. */
+/** ESRCH means definitely dead; permission errors and malformed owners fail closed. */
+export function processIsAlive(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid < 1) return true;
+  try { process.kill(pid, 0); return true; }
+  catch (err) { return (err as NodeJS.ErrnoException).code !== "ESRCH"; }
+}
+
+async function removeClaim(path: string, claim: string): Promise<void> {
+  // Only this unique claim may be unlinked. A newly acquired lock has a different
+  // filename and is nonempty, so competing reclaimers cannot delete its owner.
+  await unlink(join(path, claim)).catch((err: NodeJS.ErrnoException) => { if (err.code !== "ENOENT") throw err; });
+  await rmdir(path).catch((err: NodeJS.ErrnoException) => {
+    if (!["ENOENT", "ENOTEMPTY", "EEXIST"].includes(err.code ?? "")) throw err;
+  });
+}
+
+async function reclaimDeadLock(path: string): Promise<void> {
+  try {
+    const info = await lstat(path);
+    if (info.isSymbolicLink() || (process.getuid && info.uid !== process.getuid())) return;
+    if (info.isFile()) {
+      // Legacy releases wrote a plain PID. unlink cannot remove a newly published
+      // directory lock, even if another process recovers this file concurrently.
+      const text = await readFile(path, "utf8");
+      if (/^[1-9]\d*\s*$/.test(text) && !processIsAlive(Number(text.trim()))) {
+        await unlink(path).catch((err: NodeJS.ErrnoException) => {
+          if (!["ENOENT", "EISDIR", "EPERM"].includes(err.code ?? "")) throw err;
+        });
+      }
+      return;
+    }
+    if (!info.isDirectory() || (info.mode & 0o077) !== 0) return;
+    const entries = await readdir(path);
+    if (entries.length === 0) {
+      await rmdir(path).catch((err: NodeJS.ErrnoException) => {
+        if (!["ENOENT", "ENOTEMPTY", "EEXIST"].includes(err.code ?? "")) throw err;
+      });
+      return;
+    }
+    if (entries.length !== 1) return;
+    const claim = entries[0]!;
+    const owner = /^([1-9]\d*)-([a-f0-9-]{36})\.owner$/.exec(claim);
+    if (owner && !processIsAlive(Number(owner[1]))) await removeClaim(path, claim);
+  } catch (err) {
+    if (!["ENOENT", "ENOTDIR", "EISDIR"].includes((err as NodeJS.ErrnoException).code ?? "")) throw err;
+  }
+}
+
+/** Atomic, nonempty directory locks work across processes and recover dead owners. */
 export async function withAuthLock<T>(path: string, run: () => Promise<T>, timeoutMs = 5_000): Promise<T> {
   await privateDirectory(dirname(path));
   const deadline = Date.now() + timeoutMs;
-  let handle;
-  for (;;) {
-    try {
-      handle = await open(path, "wx", 0o600);
-      break;
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-      if (Date.now() >= deadline) throw new Error(`Authentication state is busy or a stale lock needs removal: ${path}`);
-      await new Promise((done) => setTimeout(done, Math.min(25, Math.max(1, deadline - Date.now()))));
-    }
-  }
+  const claim = `${process.pid}-${randomUUID()}.owner`;
+  const candidate = `${path}.${claim}.candidate`;
+  await mkdir(candidate, { mode: 0o700 });
+  let owned = false;
+  let publishing: Promise<void> | undefined;
+  let releasing: Promise<void> | undefined;
+  const release = () => releasing ??= (async () => {
+    await publishing?.catch(() => {});
+    if (owned) await removeClaim(path, claim);
+    await rm(candidate, { recursive: true, force: true });
+  })();
+  const unregister = registerCleanup(release);
   try {
-    await handle.writeFile(String(process.pid));
+    const file = await open(join(candidate, claim), "wx", 0o600);
+    try { await file.writeFile(String(process.pid)); } finally { await file.close(); }
+    for (;;) {
+      throwIfInterrupted();
+      try {
+        publishing = rename(candidate, path).then(() => { owned = true; });
+        await publishing;
+        break;
+      }
+      catch (err) {
+        throwIfInterrupted();
+        if (!["EEXIST", "ENOTEMPTY", "ENOTDIR", "EISDIR"].includes((err as NodeJS.ErrnoException).code ?? "")) throw err;
+        await reclaimDeadLock(path);
+        if (Date.now() >= deadline) throw new Error(`Local state lock is busy or has an unrecognized owner: ${path}`);
+        await new Promise((done) => setTimeout(done, Math.min(25, Math.max(1, deadline - Date.now()))));
+      }
+    }
+    throwIfInterrupted();
     return await run();
   } finally {
-    await handle.close();
-    await unlink(path);
+    try { await release(); }
+    finally { unregister(); }
+  }
+}
+
+/** Fresh no-persist profiles live outside the persistent authentication directory. */
+export function temporaryProfileRoot(sessionPath: string): string {
+  const key = createHash("sha256").update(resolve(sessionPath)).digest("hex");
+  return join(tmpdir(), `sainsburys-temporary-${key}`);
+}
+
+/** Only recognized dead-process directories under this session's private root are removed. */
+async function clearAbandonedTemporaryProfiles(sessionPath: string): Promise<void> {
+  const root = temporaryProfileRoot(sessionPath);
+  try {
+    const info = await lstat(root);
+    if (!info.isDirectory() || info.isSymbolicLink() || (info.mode & 0o077) !== 0 ||
+        (process.getuid && info.uid !== process.getuid())) throw new Error("Unsafe temporary authentication directory.");
+    for (const entry of await readdir(root)) {
+      const owner = /^([1-9]\d*)-[a-f0-9-]{36}$/.exec(entry);
+      if (!owner) throw new Error("Unrecognized temporary authentication profile; inspect local storage.");
+      if (processIsAlive(Number(owner[1]))) throw new Error("A temporary login is still active. Close it locally before logging out.");
+      await rm(join(root, entry), { recursive: true, force: true });
+    }
+    await rmdir(root).catch((err: NodeJS.ErrnoException) => {
+      if (!["ENOENT", "ENOTEMPTY", "EEXIST"].includes(err.code ?? "")) throw err;
+    });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
   }
 }
 
@@ -107,14 +202,21 @@ export async function saveSession(path: string, session: Session): Promise<void>
     if (existing && (!existing.isFile() || existing.isSymbolicLink())) throw new Error("Unsafe session file destination.");
     const temporary = `${path}.${randomUUID()}.tmp`;
     const file = await open(temporary, "wx", 0o600);
+    let cleaning: Promise<void> | undefined;
+    const cleanup = () => cleaning ??= (async () => {
+      await file.close().catch(() => {});
+      await rm(temporary, { force: true });
+    })();
+    const unregister = registerCleanup(cleanup);
     try {
       await file.writeFile(JSON.stringify(session, null, 2), "utf8");
       await file.sync();
       await file.close();
+      throwIfInterrupted();
       await rename(temporary, path);
     } finally {
-      await file.close().catch(() => {});
-      await rm(temporary, { force: true });
+      try { await cleanup(); }
+      finally { unregister(); }
     }
   });
 }
@@ -122,10 +224,27 @@ export async function saveSession(path: string, session: Session): Promise<void>
 /** Remove session JSON and every browser profile associated with this session path. */
 export async function clearSession(path: string): Promise<void> {
   await withAuthLock(`${path}.profile.lock`, () => withAuthLock(`${path}.lock`, async () => {
+    const legacy = join(dirname(path), "browser-data");
+    const legacyInfo = await lstat(legacy).catch((err: NodeJS.ErrnoException) => {
+      if (err.code === "ENOENT") return null;
+      throw err;
+    });
+    const knownLegacyDirectory = resolve(dirname(path)) === resolve(join(homedir(), ".config", "sainsburys"));
+    if (legacyInfo && !knownLegacyDirectory) {
+      throw new Error("Logout is incomplete: a legacy browser-data folder beside this custom session path has unverified ownership. Inspect it locally before removing or relocating it, then run logout again.");
+    }
+    await clearAbandonedTemporaryProfiles(path);
     await rm(path, { force: true });
+    // A SIGKILL during an atomic save can leave its private temporary file.
+    const prefix = `${basename(path)}.`;
+    for (const entry of await readdir(dirname(path))) {
+      if (entry.startsWith(prefix) && /^[a-f0-9-]{36}\.tmp$/.test(entry.slice(prefix.length))) {
+        await rm(join(dirname(path), entry), { force: true });
+      }
+    }
     await rm(profileRoot(path), { recursive: true, force: true });
-    // Also remove the original version's shared profile, so upgrading then logging out clears it.
-    await rm(join(dirname(path), "browser-data"), { recursive: true, force: true });
+    // The original profile name is only known to belong to this app in its default directory.
+    if (knownLegacyDirectory) await rm(legacy, { recursive: true, force: true });
   }));
 }
 

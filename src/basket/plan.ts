@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { withAuthLock } from "../auth/session.js";
-import { addItem, findItemBySku, getBasket, normalizeIdentifier, productUid, updateItems, validateQuantity, type BasketContext } from "../api/basket.js";
+import { addItem, findItemBySku, getBasket, itemIdentifiers, normalizeIdentifier, productUid, updateItems, validateQuantity, type BasketContext } from "../api/basket.js";
 import { getActiveOrderStatus } from "../api/order.js";
 import { getProductsByUid, type ProductQueryContext } from "../api/product.js";
 import type { Basket, BasketItem, Product } from "../api/types.js";
@@ -49,12 +49,26 @@ function lineKey(i: BasketItem): string {
   if (!key) throw new Error("Basket line has no stable product identifier");
   return normalizeIdentifier(key);
 }
-function state(basket: Basket): StateLine[] {
+function state(basket: Basket, identities: {key:string;sku?:string}[] = []): StateLine[] {
   return basket.items.map((i) => {
     const lineTotal = i.subtotal_price ?? i.sub_total;
     if (typeof lineTotal !== "number" || !Number.isFinite(lineTotal) || lineTotal < 0) throw new Error("Basket line is missing its price");
-    return { key: lineKey(i), sku: productUid(i), itemUid: i.item_uid!, quantity: i.quantity, uom: i.uom, selectedCatchweight: i.selected_catchweight ?? "", lineTotal };
+    const sku = productUid(i);
+    const ids = itemIdentifiers(i);
+    const matches = identities.filter(identity => ids.includes(identity.key) || (identity.sku !== undefined && ids.includes(identity.sku)));
+    if (new Set(matches.map(identity => identity.key)).size > 1 || matches.some(identity => sku !== undefined && identity.sku !== undefined && sku !== identity.sku)) {
+      throw new Error("Basket product identifiers conflict with the reviewed plan");
+    }
+    return { key: matches[0]?.key ?? lineKey(i), sku, itemUid: i.item_uid!, quantity: i.quantity, uom: i.uom, selectedCatchweight: i.selected_catchweight ?? "", lineTotal };
   }).sort((a, b) => a.itemUid.localeCompare(b.itemUid));
+}
+function stateForPlan(basket: Basket, plan: BasketPlan): StateLine[] {
+  return state(basket, [...plan.baseline, ...plan.changes]);
+}
+function findPlannedLine(basket: Basket, plan: BasketPlan, key: string): BasketItem | undefined {
+  const matches = stateForPlan(basket, plan).filter(line => line.key === key);
+  if (matches.length > 1) throw new Error("Multiple basket lines match the reviewed product");
+  return basket.items.find(line => line.item_uid === matches[0]?.itemUid);
 }
 function quantityState(lines: StateLine[]): string {
   return canonical(lines.map(({ key, quantity, uom, selectedCatchweight }) => ({ key, quantity, uom, selectedCatchweight })).sort((a, b) => canonical(a).localeCompare(canonical(b))));
@@ -71,6 +85,13 @@ function expectedLines(plan: BasketPlan, changes: PlanChange[]): StateLine[] {
     } else if (change.to) lines.push({ key: change.key, sku: change.sku, itemUid: "pending", quantity: change.to, uom: change.uom, selectedCatchweight: change.selectedCatchweight, lineTotal: change.unitPrice * change.to });
   }
   return lines;
+}
+function estimateTotal(baseline: StateLine[], baselineTotal: number, changes: PlanChange[]): number {
+  const total = baselineTotal + changes.reduce((sum, change) => {
+    const old = baseline.find(line => line.key === change.key);
+    return sum - (old?.lineTotal ?? 0) + change.unitPrice * change.to;
+  }, 0);
+  return Math.max(0, Math.round(total * 100) / 100);
 }
 function checkConstraints(constraints: Constraints): void {
   if (!constraints || !Number.isFinite(constraints.maxTotal) || constraints.maxTotal < 0 || constraints.maxTotal > 10000 ||
@@ -92,6 +113,12 @@ async function lookup(c: PlanContext, sku: string): Promise<Product> {
   const matches = response.products.filter((p) => [p.sku, p.product_uid, p.sainId, p.sain_id].some((v) => v !== undefined && normalizeIdentifier(v) === sku));
   if (matches.length !== 1) throw new Error("Product lookup did not resolve exactly one matching product");
   return matches[0]!;
+}
+function soldByUnit(product: Product): "ea" | "kg" {
+  const measure = product.retail_price?.measure;
+  if (measure === "ea" || measure === "unit") return "ea";
+  if (measure === "kg") return "kg";
+  throw new Error("Product sold-by unit is unknown; verify this item on the website before adding it");
 }
 function price(p: Product, line?: BasketItem): number {
   const value = p.retail_price?.price;
@@ -122,7 +149,9 @@ export async function createBasketPlan(c: PlanContext, targets: TargetInput[], c
     const uid = normalizeIdentifier(product.product_uid ?? product.sku, "resolved numeric SKU");
     if (!/^\d+$/.test(uid)) throw new Error("Product lookup has no numeric SKU");
     const line = existing ?? findItemBySku(basket, uid) ?? (product.sainId ? findItemBySku(basket, normalizeIdentifier(product.sainId)) : undefined);
-    const uom = target.uom ?? line?.uom ?? product.retail_price?.measure ?? "ea";
+    const productUnit = !line && target.quantity > 0 ? soldByUnit(product) : undefined;
+    const uom = target.uom ?? line?.uom ?? productUnit ?? "ea";
+    if (productUnit && uom !== productUnit) throw new Error("New-line unit differs from the product's sold-by unit");
     validateQuantity(target.quantity, uom);
     if (line && target.uom !== undefined && target.uom !== line.uom) throw new Error("A target cannot change an existing line's unit");
     const selectedCatchweight = target.selectedCatchweight ?? line?.selected_catchweight ?? "";
@@ -137,10 +166,7 @@ export async function createBasketPlan(c: PlanContext, targets: TargetInput[], c
   const plan: BasketPlan = { version: 1, accountId: c.client.getSession().userId, basketId: basket.basket_id,
     context: stableContext(c.basketContext), productContext: c.productContext, reservationId: c.reservationId ?? null, baseline, baselineTotal: basket.total_price, changes,
     estimatedTotal: 0, constraints, approval: "" };
-  plan.estimatedTotal = Math.max(0, Math.round((basket.total_price + changes.reduce((total, ch) => {
-    const old = baseline.find((l) => l.key === ch.key);
-    return total - (old?.lineTotal ?? 0) + ch.unitPrice * ch.to;
-  }, 0)) * 100) / 100);
+  plan.estimatedTotal = estimateTotal(baseline, basket.total_price, changes);
   if (plan.estimatedTotal > constraints.maxTotal || expectedLines(plan, changes).some((i) => i.quantity > constraints.maxQuantity)) throw new Error("Proposed basket exceeds the approved quantity or spending limit");
   plan.approval = planApproval(plan);
   validatePlan(plan, plan.approval);
@@ -176,7 +202,7 @@ function validatePlan(value: unknown, approval: string): BasketPlan {
     }
     keys.add(ch.key);
   }
-  const estimate = Math.max(0, Math.round((p.baselineTotal + p.changes.reduce((sum, ch) => sum - (p.baseline.find((l) => l.key === ch.key)?.lineTotal ?? 0) + ch.unitPrice * ch.to, 0)) * 100) / 100);
+  const estimate = estimateTotal(p.baseline, p.baselineTotal, p.changes);
   if (!Number.isFinite(p.estimatedTotal) || p.estimatedTotal !== estimate || estimate > p.constraints.maxTotal || expectedLines(p, p.changes).some((l) => l.quantity > p.constraints.maxQuantity)) throw new Error("Plan estimate or quantities violate the spending or quantity limit");
   return p;
 }
@@ -186,7 +212,7 @@ async function applyLocked(c: PlanContext, value: unknown, approval: string): Pr
   let basket = await getBasket(c.client, c.basketContext);
   await guard(c, basket);
   if (basket.basket_id !== plan.basketId) throw new Error("Basket identity changed; create a new plan");
-  const current = state(basket);
+  const current = stateForPlan(basket, plan);
   const final = expectedLines(plan, plan.changes);
   if (quantityState(current) === quantityState(final)) {
     enforceBasket(basket, plan.constraints);
@@ -195,9 +221,10 @@ async function applyLocked(c: PlanContext, value: unknown, approval: string): Pr
   if (canonical(current) !== canonical(plan.baseline) || basket.total_price !== plan.baselineTotal) throw new Error("Basket contents or prices changed; create a new plan");
   for (const ch of plan.changes) {
     const p = await lookup(c, ch.sku);
-    const existing = basket.items.find((i) => lineKey(i) === ch.key);
+    const existing = findPlannedLine(basket, plan, ch.key);
+    if (!existing && ch.to > 0 && ch.uom !== soldByUnit(p)) throw new Error("New-line unit differs from the product's sold-by unit");
     const resolved = normalizeIdentifier(p.product_uid ?? p.sku);
-    const productKey = existing ? lineKey(existing) : normalizeIdentifier(p.sainId ?? p.sain_id ?? resolved);
+    const productKey = existing ? ch.key : normalizeIdentifier(p.sainId ?? p.sain_id ?? resolved);
     const productIds = [p.sku, p.product_uid, p.sainId, p.sain_id].filter((id) => id !== undefined).map((id) => normalizeIdentifier(id));
     const existingIds = existing ? [productUid(existing), existing.sain_id, existing.product?.sainId, existing.product?.sain_id].filter((id) => id !== undefined).map((id) => normalizeIdentifier(id)) : [];
     if (existing && !existingIds.some((id) => productIds.includes(id))) throw new Error("Product lookup does not match the existing basket line");
@@ -212,9 +239,9 @@ async function applyLocked(c: PlanContext, value: unknown, approval: string): Pr
     try {
       const before = await getBasket(c.client, c.basketContext);
       await guard(c, before);
-      if (quantityState(state(before)) !== quantityState(expectedLines(plan, applied))) throw new Error("Basket changed during application");
+      if (quantityState(stateForPlan(before, plan)) !== quantityState(expectedLines(plan, applied))) throw new Error("Basket changed during application");
       if (before.basket_id !== plan.basketId) throw new Error("Basket identity changed during application");
-      const line = before.items.find((i) => lineKey(i) === ch.key);
+      const line = findPlannedLine(before, plan, ch.key);
       let writeError: unknown;
       try {
         if (line) await updateItems(c.client, c.basketContext, [{ productUid: ch.sku, itemUid: line.item_uid!, quantity: ch.to, uom: ch.uom, selectedCatchweight: ch.selectedCatchweight, decreasingQuantity: ch.to < line.quantity }]);
@@ -222,7 +249,7 @@ async function applyLocked(c: PlanContext, value: unknown, approval: string): Pr
       } catch (err) { writeError = err; }
       let after: Basket;
       let afterState: StateLine[];
-      try { after = await getBasket(c.client, c.basketContext); afterState = state(after); }
+      try { after = await getBasket(c.client, c.basketContext); afterState = stateForPlan(after, plan); }
       catch { throw new BasketApplyError("Write outcome is unknown because basket readback failed. Inspect the website before any further change.", "unknown", completed); }
       basket = after;
       if (after.basket_id !== plan.basketId || after.is_in_amend_mode || quantityState(afterState) !== quantityState(expectedLines(plan, [...applied, ch]))) {

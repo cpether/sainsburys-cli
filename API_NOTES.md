@@ -30,9 +30,11 @@ The retained read-only order list/detail API functions are not exposed as CLI co
 
 ## Identifiers, units and estimates
 
+Basket-line IDs never participate in product matching. Readback reconciles the reviewed SKU/sain-ID pair across response shapes and rejects conflicting identities.
+
 Product SKUs are numeric `product_uid` or `product.sku`, sometimes JSON numbers that must normalize to strings. `sain_id`/`sainId` are distinct alphanumeric product identifiers. `item_uid` is the basket-line ID, never the product SKU. A basket response can put the SKU only in `product.sku`; preserve this shape. Line totals can be `subtotal_price` or `sub_total`.
 
-Preserve the existing line's `uom` and `selected_catchweight` on updates. Initially only `ea` and `kg` are supported for writes, with conservative bounds. New catchweight selection requires website review; the integration preserves existing selections. These fields and actual weight/pricing behavior need a supervised check before using weighted goods.
+Preserve the existing line's `uom` and `selected_catchweight` on updates. Initially only `ea` and `kg` are supported for writes, with conservative bounds. New lines must match a known sold-by unit. Unknown units require website review. New catchweight selection requires website review; the integration preserves existing selections. These fields and actual weight/pricing behavior need a supervised check before using weighted goods.
 
 ## Unresolved live questions
 
