@@ -26,6 +26,8 @@ export interface Session {
   capturedAt: number;
   /** New local logins have a distinct generation; cookie refresh never changes it. */
   authGeneration?: string;
+  /** Use the resident account browser for API transport and silent session renewal. */
+  browserManaged?: boolean;
   userAgent: string;
 }
 
@@ -201,6 +203,7 @@ function validSession(value: unknown): value is Session {
     typeof s.userId === "string" && /^\d+$/.test(s.userId) &&
     Number.isFinite(s.capturedAt) && typeof s.userAgent === "string" &&
     (s.accountEmail === undefined || typeof s.accountEmail === "string") &&
+    (s.browserManaged === undefined || typeof s.browserManaged === "boolean") &&
     (s.authGeneration === undefined || (typeof s.authGeneration === "string" && /^[a-f0-9-]{36}$/.test(s.authGeneration)));
 }
 

@@ -61,6 +61,16 @@ describe("authenticated request confinement", () => {
       assert.throws(() => c.buildHeaders({ [header]: "dummy" }));
     }
   });
+
+  it("does not send fixed Linux/Chromium hints alongside a captured Mac user agent", async () => {
+    const { fetch, calls } = makeFakeFetch([{ body: {} }]);
+    const userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/148.0.0.0 Safari/537.36";
+    const c = new GroceriesClient({ session: fakeSession({ userAgent }), baseUrl: RETAILER_ORIGIN, fetchImpl: fetch });
+    await c.request("/groceries-api/gol-services/customer/v1/customer/profile");
+    assert.equal(calls[0]?.headers["user-agent"], userAgent);
+    assert.equal(calls[0]?.headers["sec-ch-ua-platform"], undefined);
+    assert.equal(calls[0]?.headers["sec-ch-ua"], undefined);
+  });
 });
 
 describe("bounded requests and cancellation", () => {

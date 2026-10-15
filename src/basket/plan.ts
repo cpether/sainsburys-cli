@@ -2,12 +2,12 @@ import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { withAuthLock } from "../auth/session.js";
-import { beginUnverifiedWrite } from "../auth/lifecycle.js";
+import { beginUnverifiedWrite, interruptionSignal } from "../auth/lifecycle.js";
 import { addItem, findItemBySku, getBasket, itemIdentifiers, normalizeIdentifier, productUid, updateItems, validateQuantity, type BasketContext } from "../api/basket.js";
 import { getActiveOrderStatus } from "../api/order.js";
 import { getProductsByUid, type ProductQueryContext } from "../api/product.js";
 import type { Basket, BasketItem, Product } from "../api/types.js";
-import type { GroceriesClient } from "../client/http.js";
+import { ApiError, AuthError, RequestCancelledError, RequestTimeoutError, ResponseValidationError, type GroceriesClient } from "../client/http.js";
 
 export interface TargetInput { sku: string; quantity: number; uom?: string; selectedCatchweight?: string }
 export interface Constraints { maxTotal: number; maxQuantity: number }
@@ -28,9 +28,57 @@ export interface BasketPlan {
   approval: string;
 }
 export interface PlanContext { client: GroceriesClient; basketContext: BasketContext; productContext: ProductQueryContext; reservationId?: string | null }
+export interface ReadbackFailure {
+  category: "authentication" | "http" | "network" | "local_state" | "timeout" | "cancelled" | "validation" | "unknown";
+  httpStatus?: number;
+}
 export class BasketApplyError extends Error {
-  constructor(message: string, public readonly outcome: "mismatch" | "unknown" | "partial", public readonly verifiedChanges: number, public readonly basket?: Basket) {
+  constructor(message: string, public readonly outcome: "mismatch" | "unknown" | "partial", public readonly verifiedChanges: number, public readonly basket?: Basket, public readonly readbackFailure?: ReadbackFailure) {
     super(message); this.name = "BasketApplyError";
+  }
+}
+// ApiError(0) also represents private persistence failures. Retry only the
+// client's fixed network category, never a failed local authentication save.
+function isNetworkReadFailure(error: unknown): error is ApiError {
+  return error instanceof ApiError && error.status === 0 && error.message === "The retailer request could not be completed.";
+}
+function readbackFailure(error: unknown): ReadbackFailure {
+  const status = error instanceof ApiError || error instanceof AuthError ? error.status : undefined;
+  const httpStatus = status !== undefined && status >= 100 && status <= 599 ? status : undefined;
+  let category: ReadbackFailure["category"] = "unknown";
+  if (error instanceof AuthError) category = "authentication";
+  else if (error instanceof RequestTimeoutError) category = "timeout";
+  else if (error instanceof RequestCancelledError) category = "cancelled";
+  else if (error instanceof ResponseValidationError) category = "validation";
+  else if (isNetworkReadFailure(error)) category = "network";
+  else if (error instanceof ApiError) category = error.status === 0 ? "local_state" : "http";
+  return { category, ...(httpStatus !== undefined ? { httpStatus } : {}) };
+}
+async function waitForReadbackRetry(): Promise<void> {
+  const signal = interruptionSignal();
+  if (signal.aborted) throw new RequestCancelledError();
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => { signal.removeEventListener("abort", cancel); resolve(); }, 250);
+    const cancel = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", cancel);
+      reject(new RequestCancelledError());
+    };
+    signal.addEventListener("abort", cancel, { once: true });
+    if (signal.aborted) cancel();
+  });
+}
+/** Two read-only requests, each subject to the HTTP client's bounded deadline,
+ * plus a 250ms delay. This helper never submits or retries a basket mutation. */
+async function readBasketAfterWrite(c: PlanContext): Promise<Basket> {
+  try { return await getBasket(c.client, c.basketContext); }
+  catch (error) {
+    const transient = isNetworkReadFailure(error) ||
+      (error instanceof ApiError && !(error instanceof ResponseValidationError) && [500, 502, 503, 504].includes(error.status));
+    if (!transient || interruptionSignal().aborted) throw error;
+    await waitForReadbackRetry();
+    if (interruptionSignal().aborted) throw new RequestCancelledError();
+    return getBasket(c.client, c.basketContext);
   }
 }
 function canonical(value: unknown): string {
@@ -255,8 +303,10 @@ async function applyLocked(c: PlanContext, value: unknown, approval: string): Pr
       try {
         let after: Basket;
         let afterState: StateLine[];
-        try { after = await getBasket(c.client, c.basketContext); afterState = stateForPlan(after, plan); }
-        catch { throw new BasketApplyError("Write outcome is unknown because basket readback failed. Inspect the website before any further change.", "unknown", completed); }
+        try { after = await readBasketAfterWrite(c); }
+        catch (error) { throw new BasketApplyError("Write outcome is unknown because basket readback failed. Inspect the website before any further change.", "unknown", completed, undefined, readbackFailure(error)); }
+        try { afterState = stateForPlan(after, plan); }
+        catch { throw new BasketApplyError("Write outcome is unknown because basket readback could not be validated. Inspect the website before any further change.", "unknown", completed, undefined, { category: "validation" }); }
         basket = after;
         if (after.basket_id !== plan.basketId || after.is_in_amend_mode || quantityState(afterState) !== quantityState(expectedLines(plan, [...applied, ch]))) {
           throw new BasketApplyError(writeError ? "Write outcome is uncertain or differs from the target. Inspect the basket before creating a new plan." : "Basket readback differs from the target or changed another line.", writeError ? "unknown" : "mismatch", completed, after);
