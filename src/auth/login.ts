@@ -126,17 +126,8 @@ async function captureLogin(opts: LoginOptions, email: string, log: (msg: string
       if (!wcauthtoken || !bearerToken) throw new LocalLoginError("Login did not capture authenticated API credentials.");
       log("Authenticated API credentials captured; verifying account identity.");
       stage = "reading browser session state";
-      const cookies = (await context.cookies()).filter((c) => {
-        const domain = c.domain.replace(/^\./, "");
-        return domain === "sainsburys.co.uk" || domain.endsWith(".sainsburys.co.uk");
-      });
-      const sessionCookies: SessionCookie[] = cookies.map((c) => ({
-        name: c.name, value: c.value, domain: c.domain, path: c.path,
-        expires: c.expires === -1 ? undefined : c.expires,
-        httpOnly: c.httpOnly, secure: c.secure, sameSite: c.sameSite,
-      }));
       const session: Session = {
-        cookies: sessionCookies, wcauthtoken, bearerToken,
+        cookies: await captureCookies(context), wcauthtoken, bearerToken,
         userId: parseWcauthtoken(wcauthtoken).userId,
         capturedAt: Date.now(),
         userAgent,
@@ -166,7 +157,13 @@ async function captureLogin(opts: LoginOptions, email: string, log: (msg: string
           }
           try {
             const status = result.status();
-            return new Response([204, 205, 304].includes(status) ? null : body, { status, headers: result.headers() });
+            // Playwright joins repeated Set-Cookie values with newlines, which
+            // Fetch Headers rejects. Its cookie jar already processes them. The
+            // HTTP validator only needs these response metadata fields.
+            const source = result.headers();
+            const headers: Record<string, string> = {};
+            for (const name of ["content-type", "content-length"]) if (source[name] !== undefined) headers[name] = source[name];
+            return new Response([204, 205, 304].includes(status) ? null : body, { status, headers });
           } catch {
             verificationFailure = "browser verification response could not be adapted";
             throw new Error("Browser verification response failed.");
@@ -179,6 +176,10 @@ async function captureLogin(opts: LoginOptions, email: string, log: (msg: string
       if (String(profile.user_id) !== session.userId || profile.email.trim().toLowerCase() !== email) {
         throw new LocalLoginError("Authenticated browser account does not match SAINSBURYS_EMAIL. Log out in the local browser and retry with the intended account.");
       }
+      // The verification response may rotate authentication cookies in the shared
+      // browser/API cookie jar. Export that final state, not the pre-read snapshot.
+      stage = "reading verified browser session state";
+      session.cookies = await captureCookies(context);
       session.accountEmail = email;
       log("Account identity verified; local login complete.");
       return session;
@@ -209,6 +210,17 @@ async function captureLogin(opts: LoginOptions, email: string, log: (msg: string
   }
 }
 
+async function captureCookies(context: BrowserContext): Promise<SessionCookie[]> {
+  return (await context.cookies()).filter(cookie => {
+    const domain = cookie.domain.replace(/^\./, "");
+    return domain === "sainsburys.co.uk" || domain.endsWith(".sainsburys.co.uk");
+  }).map(cookie => ({
+    name: cookie.name, value: cookie.value, domain: cookie.domain, path: cookie.path,
+    expires: cookie.expires === -1 ? undefined : cookie.expires,
+    httpOnly: cookie.httpOnly, secure: cookie.secure, sameSite: cookie.sameSite,
+  }));
+}
+
 /** Inspect only the failure summary, excluding Playwright's token-bearing call log. */
 function browserTransportFailure(error: unknown): string {
   if (error instanceof errors.TimeoutError) return "browser verification request timed out";
@@ -218,7 +230,7 @@ function browserTransportFailure(error: unknown): string {
     [/certificate|CERT_HAS_EXPIRED|UNABLE_TO_VERIFY_LEAF_SIGNATURE|ERR_TLS_CERT_ALTNAME_INVALID/i, "TLS certificate verification failed; check local network trust and Node certificate configuration"],
     [/ENOTFOUND|EAI_AGAIN/i, "DNS lookup failed"],
     [/ECONNREFUSED/i, "connection refused"],
-    [/ETIMEDOUT|timed out/i, "browser verification request timed out"],
+    [/ETIMEDOUT|timed out|Timeout \d+ms exceeded/i, "browser verification request timed out"],
     [/ENETUNREACH|EHOSTUNREACH/i, "network unreachable"],
     [/ERR_INVALID_CHAR|Invalid character in header/i, "browser verification request headers were rejected locally"],
     [/ERR_HTTP2_PROTOCOL_ERROR|HPE_[A-Z_]+/i, "HTTP protocol failure"],

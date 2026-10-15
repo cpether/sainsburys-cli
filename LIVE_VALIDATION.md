@@ -1,6 +1,6 @@
 # Supervised live validation
 
-Status: pending successful CLI login and verified reads. The first user-supervised attempt reached the account/trolley page, then closed with a generic terminal failure. A retry with stage diagnostics captured authenticated credentials, then failed during the separate account-verification transport before a usable HTTP response. The underlying transport cause remains unconfirmed; another diagnostic build now distinguishes fixed TLS, connection, DNS, timeout and response-adapter categories. The assistant has made no live retailer requests or basket changes. Mocked tests establish local behavior only.
+Status: pending successful CLI login and verified reads. The first user-supervised attempt reached the account/trolley page, then closed with a generic terminal failure. A retry with stage diagnostics captured authenticated credentials, then failed before a usable verification response reached the validator. Claude independently reproduced a response-adapter failure with multiple Set-Cookie headers using real Playwright HTTP and a dummy loopback server. That defect and the export of cookies refreshed by verification are fixed with regression coverage. It is a strong candidate for the live cause, awaiting retry. The assistant has made no live retailer requests or basket changes. Offline tests establish local behavior only.
 
 ## Login and reads
 

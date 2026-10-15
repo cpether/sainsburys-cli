@@ -4,7 +4,8 @@ import { EventEmitter } from "node:events";
 import { mkdtemp, rm, stat, readFile, readdir, chmod, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { chromium, errors, type BrowserContext } from "playwright";
+import { createServer } from "node:http";
+import { chromium, errors, request, type BrowserContext } from "playwright";
 import { performLogin, type LoginOptions } from "../src/auth/login.js";
 import { browserDataDir, launchContext } from "../src/auth/browser.js";
 import { clearSession, saveSession, loadSession, profileRoot, withAuthLock } from "../src/auth/session.js";
@@ -112,6 +113,33 @@ describe("private authentication storage", () => {
 });
 
 describe("manual local login", () => {
+  it("verifies a real Playwright response with multiple Set-Cookie headers and retains refreshed cookies", () => temporary(async (dir) => {
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "application/json", "set-cookie": ["first=dummy-first; Path=/", "second=dummy-second; Path=/"] });
+      res.end(JSON.stringify({ user_id: "123456789", email: "dummy@example.com" }));
+    });
+    await new Promise<void>(done => server.listen(0, "127.0.0.1", done));
+    const transport = await request.newContext();
+    try {
+      const address = server.address();
+      assert.ok(address && typeof address !== "string");
+      const fake = fakeBrowser();
+      fake.context.request.get = async (_input, init) => transport.get(`http://127.0.0.1:${address.port}/profile`, init);
+      // BrowserContext.request shares its context's cookie jar. Model that here
+      // with real Playwright storage state, mapping loopback dummy cookies to the
+      // retailer domain solely for the session cookie allowlist under test.
+      fake.context.cookies = async () => (await transport.storageState()).cookies.map(cookie => ({ ...cookie, domain: ".sainsburys.co.uk" }));
+      const opts = options(dir, { launch: fake.launch });
+      const session = await performLogin(opts);
+      assert.equal(session.accountEmail, "dummy@example.com");
+      assert.deepEqual(session.cookies.map(cookie => [cookie.name, cookie.value]).sort(), [["first", "dummy-first"], ["second", "dummy-second"]]);
+      assert.deepEqual((await loadSession(opts.config.sessionPath))?.cookies.map(cookie => [cookie.name, cookie.value]).sort(), [["first", "dummy-first"], ["second", "dummy-second"]]);
+    } finally {
+      await transport.dispose();
+      await new Promise<void>((done, reject) => server.close(error => error ? reject(error) : done()));
+    }
+  }));
+
   it("reads browser metadata before the login redirect can replace its execution context", () => temporary(async (dir) => {
     const fake = fakeBrowser();
     const goto = fake.page.goto;
