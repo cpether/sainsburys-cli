@@ -1,6 +1,6 @@
 # Sainsbury's protocol observations
 
-These notes preserve the useful request knowledge from upstream commit `dde7355e8b52aa64583f3ab0516fbcf35f3c45b6`. They are historical observations from the author's 2026 captures, not fresh live validation of this fork. No real HAR or account session is checked in. Tests use synthetic fixtures, clearly labeled as such. Confirm live behavior with LIVE_VALIDATION.md before relying on this integration.
+These notes preserve the useful request knowledge from upstream commit `dde7355e8b52aa64583f3ab0516fbcf35f3c45b6`. Most request shapes are historical observations from the author's 2026 captures. Supervised live login and cached read checks passed on 15 October 2026; the additional unslotted response shape is recorded below. No real HAR or account session is checked in. Tests use synthetic fixtures, clearly labeled as such. See LIVE_VALIDATION.md for completed checks and remaining validation.
 
 ## Authentication
 
@@ -8,14 +8,14 @@ The local browser performs Sainsbury's normal account/OAuth flow, including bot 
 
 The custom token URL-decodes to `<numeric user ID>,<opaque HMAC>`. Cookies are filtered for the intended host and deduplicated by name, preferring the more specific domain. Account-subdomain cookies are not replayed as www-host cookies. Cookie/token expiry and bot challenges remain live reliability risks. A 401/403 requires explicit local login; no mutation is blindly retried.
 
-The browser profile is dedicated to the account email and session path. Login verifies the customer profile's user ID and email before exporting credentials. Supported identity response shapes are flat or nested under `customer`, with `user_id` and `email` or `email_address`. These alternatives fail closed if unverifiable and still need checking in the supervised pilot.
+The browser profile is dedicated to the account email and session path. Login verifies the customer profile's user ID and email before exporting credentials. Supported identity response shapes are flat or nested under `customer`, with `user_id` and `email` or `email_address`. These alternatives fail closed if unverifiable. Live login and fresh-process cached identity reads passed; that does not establish every alternative response shape live.
 
 ## Retained request shapes
 
 All paths below are under `/groceries-api/gol-services/` on the exact retailer HTTPS origin. Authenticated redirects are refused. The feature flags snapshot remains in `src/lib/feature-flags.ts`; its necessity has not been re-established live.
 
 - `GET customer/v1/customer/profile` reads the account profile.
-- `GET slot/v1/slot/reservation` reads the current reservation. The observed reservation includes `reservation_type`, `is_expired`, `store_identifier`, `region`, `flexi_stores`, optional `reserved_until` and `slot` with start/end times, price, booking key and reservation ID. A known empty response or JSON null means no reservation. A malformed object is an error.
+- `GET slot/v1/slot/reservation` reads the current reservation. A slotted response includes `reservation_type`, boolean `is_expired`, `store_identifier`, `region`, `flexi_stores`, optional `reserved_until` and `slot` with start/end times, price, booking key and reservation ID. The supervised unslotted response had `reservation_type: "none"`, postcode/store/region/flexi-store context and an alcohol-restriction flag, with neither `slot` nor `is_expired`. Keep that store context while reporting no booked slot. Missing expiry is allowed only without a slot; active-slot context requires explicit `is_expired: false`. A known empty response or JSON null means no reservation. A malformed object is an error.
 - `GET basket/v2/basket` uses `pick_time`, `store_number`, `slot_booked` and `calculate=true`. Derive store and delivery time from current account/reservation, honoring explicit overrides. Unknown context needs an explicit store. No generic store or old-order fallback is used.
 - `POST basket/v2/basket/item` sends `product_uid`, `quantity`, `uom` and `selected_catchweight`.
 - `PUT basket/v2/basket` sends an `items` array with those fields plus `item_uid`. `decreasing_quantity=true` is observed when decreasing. A zero quantity removes the line. JSON null or an empty successful write response is valid for this endpoint; it is followed by authoritative basket readback. HTML or malformed JSON is never an empty success.

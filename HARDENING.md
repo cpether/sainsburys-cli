@@ -47,7 +47,7 @@ The second Claude pass independently exported and tested the committed fix, foun
 
 ## Limits and next action
 
-Live validation did not happen. The next action is the person's local login in LIVE_VALIDATION.md, followed by comparing identity, context, search and basket with the website. A specific reversible test item/quantity sequence still requires approval. No purchase, amendment or slot booking is authorized.
+Live login and fresh-process cached reads subsequently passed. Read-only checks covered identity, store/reservation context, active order status, search, candidate product details and basket. The observed unslotted reservation omitted `is_expired`; three new regression tests reproduce and fix that schema mismatch while keeping booked-slot expiry validation strict. Typecheck, build, all 157 tests and dependency audit pass. Real account values were replaced with dummy values in the synthetic fixture. Website comparison and the specific reversible basket test still require the person's participation and approval. Natural session expiry remains untested. No purchase, amendment or slot booking is authorized.
 
 The undocumented API can change, bot protection may reject replay, and the profile/context schemas may require adjustments after sanitized live observation. A plan is not an atomic retailer transaction. Price changes or a readback failure can leave verified or uncertain partial changes. Weighted fulfillment, substitutions and later website actions prevent a local estimate from guaranteeing the eventual payment amount. Existing catchweight is preserved; new catchweight choices stay on the website. Removal still requires a resolvable product and valid price; otherwise use the website.
 
