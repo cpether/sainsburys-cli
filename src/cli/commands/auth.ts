@@ -1,9 +1,9 @@
 import { Command } from "commander";
 import { performLogin } from "../../auth/login.js";
-import { clearSession, loadSession } from "../../auth/session.js";
+import { loadSession } from "../../auth/session.js";
 import { loadConfig, loadConfigPartial } from "../../config.js";
 import { printData, printError, exitCodeFor } from "../output.js";
-import { residentLogin, residentStatus, stopResidentService } from "../../client/resident-service.js";
+import { logoutResidentSession, residentLogin, residentStatus, stopResidentService } from "../../client/resident-service.js";
 
 export function authCommand(): Command {
   const cmd = new Command("auth").description("Manage Sainsbury's session credentials");
@@ -98,8 +98,7 @@ export function authCommand(): Command {
       const format = root.json ? "json" : "text";
       try {
         const config = loadConfigPartial();
-        await stopResidentService(config.sessionPath);
-        await clearSession(config.sessionPath);
+        await logoutResidentSession(config.sessionPath);
         printData({ format }, { ok: true }, () => `Cleared ${config.sessionPath}`);
       } catch (err) {
         printError(err);

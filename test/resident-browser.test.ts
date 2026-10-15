@@ -2,7 +2,7 @@ import { describe, it, mock } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
-import { loadSession,clearSession } from "../src/auth/session.js";
+import { loadSession,clearSession, type Session } from "../src/auth/session.js";
 import { ApiError,AuthError,RequestCancelledError,ResponseValidationError } from "../src/client/http.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,12 +12,12 @@ import { ResidentBrowser } from "../src/auth/resident-browser.js";
 import { browserDataDir, launchContext } from "../src/auth/browser.js";
 import { fakeSession } from "./_helpers.js";
 
-async function setup(run: (fixture: ReturnType<typeof fakeBrowser>, engine: ResidentBrowser, dir: string) => Promise<void>, signedIn = true) {
+async function setup(run: (fixture: ReturnType<typeof fakeBrowser>, engine: ResidentBrowser, dir: string) => Promise<void>, signedIn = true, sessionOverrides: Partial<Session> = {}) {
   const dir = await mkdtemp(join(tmpdir(), "sainsburys-resident-test-"));
   const fixture = fakeBrowser(signedIn);
   const config = {email:"dummy@example.invalid",sessionPath:join(dir,"session.json"),headed:true,baseUrl:"https://www.sainsburys.co.uk",loginBaseUrl:"https://account.sainsburys.co.uk"};
   await mkdir(browserDataDir(config.sessionPath,config.email),{recursive:true,mode:0o700});
-  const engine = new ResidentBrowser({config,session:fakeSession({accountEmail:config.email}),launch:fixture.launch});
+  const engine = new ResidentBrowser({config,session:fakeSession({...sessionOverrides,accountEmail:config.email}),launch:fixture.launch});
   try { await run(fixture,engine,dir); } finally { await engine.close(); await rm(dir,{recursive:true,force:true}); }
 }
 function fakeBrowser(signedIn: boolean) {
@@ -29,23 +29,32 @@ function fakeBrowser(signedIn: boolean) {
     return new Response('{}',{headers:{"content-type":"application/json"}});
   };
   const calls:{url:string;init:RequestInit}[]=[];
-  const state={signedIn,emit:true};
+  const state={signedIn,emit:true,inputs:[] as {name:string;type?:string;autocomplete?:string}[]};
   const visits:string[]=[];const windows:string[]=[];
   const context = new EventEmitter() as EventEmitter & Record<string,any>;
-  const vm = createContext({navigator:{userAgent:"DummyBrowser/1"},location:{origin:"https://www.sainsburys.co.uk"},AbortController,DOMException,TextDecoder,Uint8Array,Map,setTimeout,clearTimeout,URL,
+  const vm = createContext({navigator:{userAgent:"DummyBrowser/1"},location:{origin:"null"},AbortController,DOMException,TextDecoder,Uint8Array,Map,setTimeout,clearTimeout,URL,
     fetch:async(url:string,init:RequestInit)=>{calls.push({url,init});return handler(url,init);}});
+  const setUrl=(url:string)=>{currentUrl=url;(vm as any).location.origin=new URL(url).origin;};
   const emitPair=()=>context.emit("request",{url:()=>"https://www.sainsburys.co.uk/groceries-api/test",headers:()=>({wcauthtoken:fakeSession().wcauthtoken,authorization:`Bearer ${fakeSession().bearerToken}`})});
   const page=Object.assign(new EventEmitter(),{
     url:()=>currentUrl,
-    async goto(url:string){visits.push(url);currentUrl=state.signedIn?url:"https://account.sainsburys.co.uk/gol/login";if(state.signedIn&&state.emit)emitPair();},
-    async reload(){if(state.signedIn){currentUrl="https://www.sainsburys.co.uk/gol-ui/trolley";emitPair();}},
+    async goto(url:string){visits.push(url);setUrl(state.signedIn?url:"https://account.sainsburys.co.uk/gol/login");if(state.signedIn&&state.emit)emitPair();},
+    async reload(){if(state.signedIn){setUrl("https://www.sainsburys.co.uk/gol-ui/trolley");emitPair();}},
     async bringToFront(){shows++;},
-    locator:()=>({first(){return this;},async isVisible(){return !state.signedIn;}}),
+    locator:(selector:string)=>({first(){return this;},async isVisible(){
+      const fields=[...state.inputs,...(!state.signedIn?[{name:"password",type:"password",autocomplete:""}]:[])];
+      return fields.some(field=>selector.split(",").some(part=>{
+        const exact=part.match(/\[(name|type|autocomplete)="([^"]+)"\]/);
+        if(exact)return (field as Record<string,string>)[exact[1]!]===exact[2];
+        if(part.includes('[name*="code" i]'))return field.name.toLowerCase().includes("code");
+        return false;
+      }));
+    }}),
     async evaluate(fn:Function,arg?:unknown){(vm as any).arg=arg;return runInContext(`(${fn.toString()})(arg)`,vm);},
   });
   Object.assign(context,{pages:()=>[page],newPage:async()=>page,cookies:async()=>fakeSession().cookies,addCookies:async()=>{},close:async()=>{closes++;},
     newCDPSession:async()=>({send:async(method:string,args:any)=>{if(args?.bounds)windows.push(args.bounds.windowState);return method==="Browser.getWindowForTarget"?{windowId:1}:{};},detach:async()=>{}})});
-  return {state,page,context,calls,visits,windows,emitPair,set handler(value:typeof handler){handler=value;},get handler(){return handler;},get launches(){return launches;},get closes(){return closes;},get shows(){return shows;},
+  return {state,page,context,calls,visits,windows,emitPair,setUrl,set handler(value:typeof handler){handler=value;},get handler(){return handler;},get launches(){return launches;},get closes(){return closes;},get shows(){return shows;},
     launch:async(opts:any)=>{assert.equal(opts.headless,false);assert.equal(opts.minimized,true);launches++;return context as unknown as BrowserContext;}};
 }
 
@@ -274,3 +283,83 @@ it("rejects unknown, duplicate and malformed basket write queries before any net
   ])await assert.rejects(e.request({url:`${BASKET}/item${query}`,method:"POST",headers:{},body:JSON.stringify(change)}));
   assert.equal(f.calls.length,before);
 }));
+
+describe("resident page navigation and form detection",()=>{
+  it("restores missing cookies without overwriting a newer profile cookie or restoring expired cookies",()=>setup(async(f,e)=>{
+    const fresh={...fakeSession().cookies[0]!,value:"new-profile-value"};
+    const added:Session["cookies"]=[];
+    f.context.cookies=async()=>[fresh];
+    f.context.addCookies=async(cookies:Session["cookies"])=>{added.push(...cookies);};
+    await e.start({interactive:false,timeoutMs:500});
+    assert.equal(added.some(cookie=>cookie.name===fresh.name&&cookie.path===fresh.path&&cookie.domain===fresh.domain),false);
+    assert.equal(added.some(cookie=>cookie.name==="JSESSIONID"),true);
+    assert.equal(added.some(cookie=>cookie.name==="expired"),false);
+    assert.equal(added.some(cookie=>cookie.name===fresh.name&&cookie.path==="/other"),true);
+    assert.equal(added.some(cookie=>cookie.name===fresh.name&&cookie.domain===".sainsburys.co.uk"),true);
+  },true,{cookies:[...fakeSession().cookies,
+    {name:"expired",value:"old",domain:"www.sainsburys.co.uk",path:"/",expires:1},
+    {...fakeSession().cookies[0]!,path:"/other"},
+    {...fakeSession().cookies[0]!,domain:".sainsburys.co.uk"},
+  ]}));
+  for(const origin of ["https://account.sainsburys.co.uk/gol/login","https://outside.invalid/"]){
+    it(`silently recovers a read after idle navigation to ${new URL(origin).hostname}`,()=>setup(async(f,e)=>{
+      await e.start({interactive:false,timeoutMs:500});const visits=f.visits.length;
+      f.setUrl(origin);
+      assert.equal((await e.request({url:PRODUCT,method:"GET",headers:{}})).status,200);
+      assert.equal(f.visits.length,visits+1);assert.equal(f.shows,0);
+    }));
+    it(`rejects a write before guards or fetch after idle navigation to ${new URL(origin).hostname}`,()=>setup(async(f,e)=>{
+      await e.start({interactive:false,timeoutMs:500});const calls=f.calls.length;
+      f.setUrl(origin);
+      await assert.rejects(e.request({url:`${BASKET}/item${WRITE_QUERY}`,method:"POST",headers:{},body:JSON.stringify(change)}),AuthError);
+      assert.equal(f.calls.length,calls);assert.equal(f.shows,0);
+    }));
+  }
+  it("leaves idle-navigation recovery at an actual sign-in form minimized and requires human login",()=>setup(async(f,e)=>{
+    await e.start({interactive:false,timeoutMs:500});f.state.signedIn=false;
+    f.setUrl("https://account.sainsburys.co.uk/gol/login");const before=f.calls.length;
+    await assert.rejects(e.request({url:PRODUCT,method:"GET",headers:{}}),AuthError);
+    assert.equal(f.calls.length,before);assert.equal(e.status().needsLogin,true);assert.equal(f.shows,0);
+  }));
+  it("classifies a renderer-origin race as definite authentication failure without sending the write",()=>setup(async(f,e)=>{
+    await e.start({interactive:false,timeoutMs:500});const evaluate=f.page.evaluate.bind(f.page);
+    f.page.evaluate=async(fn:Function,arg?:unknown)=>{
+      if((arg as {method?:string})?.method==="POST")f.setUrl("https://account.sainsburys.co.uk/gol/login");
+      return evaluate(fn,arg);
+    };
+    await assert.rejects(e.request({url:`${BASKET}/item${WRITE_QUERY}`,method:"POST",headers:{},body:JSON.stringify(change)}),AuthError);
+    assert.equal(f.calls.filter(call=>call.init.method==="POST").length,0);
+  }));
+  it("recovers one renderer-origin race during a read without showing the browser",()=>setup(async(f,e)=>{
+    await e.start({interactive:false,timeoutMs:500});const evaluate=f.page.evaluate.bind(f.page);let raced=false;
+    f.page.evaluate=async(fn:Function,arg?:unknown)=>{
+      if(!raced&&(arg as {url?:string})?.url===PRODUCT){raced=true;f.setUrl("https://account.sainsburys.co.uk/gol/login");}
+      return evaluate(fn,arg);
+    };
+    assert.equal((await e.request({url:PRODUCT,method:"GET",headers:{}})).status,200);assert.equal(f.shows,0);
+  }));
+  for(const name of ["postcode","promoCode","voucherCode"]){
+    it(`verifies cached identity before treating a visible ${name} input as login`,()=>setup(async(f,e)=>{
+      f.state.inputs=[{name,type:"text"}];await e.start({interactive:false,timeoutMs:500});
+      assert.equal(e.status().authenticated,true);assert.equal(f.shows,0);
+    }));
+  }
+  it("waits for fresh credentials beside a postcode field rather than declaring MFA",()=>setup(async(f,e)=>{
+    f.state.inputs=[{name:"postcode",type:"text"}];f.state.emit=false;
+    f.handler=async(_url,init)=>new Response('{"user_id":"123456789","email":"dummy@example.invalid"}',{status:new Headers(init.headers).get("authorization")==="Bearer fresh"?200:401,headers:{"content-type":"application/json"}});
+    const started=e.start({interactive:false,timeoutMs:500});
+    setTimeout(()=>f.context.emit("request",{url:()=>`${ORIGIN}/groceries-api/test`,headers:()=>({wcauthtoken:fakeSession().wcauthtoken,authorization:"Bearer fresh"})}),20);
+    await started;assert.equal(e.status().authenticated,true);
+  }));
+  for(const input of [{name:"secret",type:"password"},{name:"verification",type:"text",autocomplete:"one-time-code"}]){
+    it(`accepts verified identity before a stale visible ${input.type==="password"?"password":"MFA"} form`,()=>setup(async(f,e)=>{
+      f.state.inputs=[input];await e.start({interactive:false,timeoutMs:500});
+      assert.equal(e.status().authenticated,true);assert.equal(f.shows,0);
+    }));
+    it(`requires explicit login for a real ${input.type==="password"?"password":"MFA"} form after credential verification fails`,()=>setup(async(f,e)=>{
+      f.state.inputs=[input];f.handler=async()=>new Response('{}',{status:401});
+      await assert.rejects(e.start({interactive:false,timeoutMs:500}),AuthError);
+      assert.equal(e.status().needsLogin,true);assert.equal(f.shows,0);
+    }));
+  }
+});

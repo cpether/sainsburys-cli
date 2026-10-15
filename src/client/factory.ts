@@ -22,7 +22,7 @@ export async function createClient(opts: CreateClientOptions = {}): Promise<Groc
     throw new AuthError(401, "Cached session has no matching verified account identity. Run local auth login for SAINSBURYS_EMAIL.");
   }
   if (!opts.session && !opts.fetchImpl && session.browserManaged) {
-    await ensureResidentService({ ...config, email: session.accountEmail! });
+    await ensureResidentService({ ...config, email: session.accountEmail! }, { userId: session.userId, authGeneration: session.authGeneration });
     return new GroceriesClient({ session, baseUrl: config.baseUrl,
       fetchImpl: residentFetch(config.sessionPath, session), defaultTimeoutMs: 60_000, trustedTransportErrors: true });
   }

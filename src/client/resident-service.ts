@@ -5,7 +5,7 @@ import { lstat, readFile, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Config } from "../config.js";
-import { loadSession, privateDirectory, processIsAlive, withAuthLock, type Session } from "../auth/session.js";
+import { clearSession, loadSession, privateDirectory, processIsAlive, withAuthLock, type Session } from "../auth/session.js";
 import { AuthError, RequestCancelledError, RequestTimeoutError, ResponseValidationError } from "./http.js";
 import { interruptionSignal } from "../auth/lifecycle.js";
 
@@ -132,11 +132,14 @@ export async function residentStatus(sessionPath: string): Promise<{ running: bo
   return { running: true, authenticated: result.authenticated === true, needsLogin: result.needsLogin !== false };
 }
 
-export async function ensureResidentService(config: Config): Promise<void> {
+export async function ensureResidentService(config: Config, expected?: {userId: string; authGeneration?: string}): Promise<void> {
   const paths = residentServicePaths(config.sessionPath);
   await prepareResidentDirectory(paths);
   await withAuthLock(paths.startupLock, async () => {
     const cached = await loadSession(config.sessionPath);
+    if (expected && (!cached || cached.userId !== expected.userId || cached.authGeneration !== expected.authGeneration)) {
+      throw new AuthError(401, "Local authentication changed or was logged out. Start a new command after local login.");
+    }
     const email = config.email.trim().toLowerCase() || cached?.accountEmail?.toLowerCase() || "";
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("Set SAINSBURYS_EMAIL to the account for local browser login.");
     if (cached?.accountEmail && email !== cached.accountEmail.toLowerCase()) throw new Error("Resident account differs from the requested account. Run auth logout before changing accounts.");
@@ -213,10 +216,27 @@ export function residentFetch(sessionPath: string, session: Session): typeof fet
   };
 }
 
-export async function stopResidentService(sessionPath: string): Promise<void> {
+async function stopResidentUnlocked(sessionPath: string): Promise<void> {
   const paths = residentServicePaths(sessionPath);
   const owner = await readResidentOwner(paths);
-  if (!owner || !processIsAlive(owner.pid)) { if (owner) await cleanDeadResident(paths); return; }
+  if (!owner || !processIsAlive(owner.pid)) { await cleanDeadResident(paths); return; }
   const result = await residentRpc(sessionPath, { operation: "stop" }, 30_000);
   if (result.stopped !== true) throw new ResidentRpcError("PROTOCOL");
+}
+
+/** Startup and explicit stop use the same lock, so they cannot create crossing daemons. */
+export async function stopResidentService(sessionPath: string): Promise<void> {
+  const paths = residentServicePaths(sessionPath);
+  await prepareResidentDirectory(paths);
+  await withAuthLock(paths.startupLock, () => stopResidentUnlocked(sessionPath), 35_000);
+}
+
+/** Stop the owner and delete all local authentication state as one startup transaction. */
+export async function logoutResidentSession(sessionPath: string): Promise<void> {
+  const paths = residentServicePaths(sessionPath);
+  await prepareResidentDirectory(paths);
+  await withAuthLock(paths.startupLock, async () => {
+    await stopResidentUnlocked(sessionPath);
+    await clearSession(sessionPath);
+  }, 40_000);
 }

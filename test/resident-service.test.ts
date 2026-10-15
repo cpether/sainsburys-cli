@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createConnection } from "node:net";
-import { mkdtemp, rm, stat, writeFile, mkdir, symlink } from "node:fs/promises";
+import { mkdtemp, rm, stat, writeFile, readFile, mkdir, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -9,7 +9,7 @@ import type { Config } from "../src/config.js";
 import { saveSession, loadSession, type Session } from "../src/auth/session.js";
 import { runResidentService, type ResidentEngine, type ResidentEngineFactory } from "../src/auth/service.js";
 import {
-  ensureResidentService, residentLogin, residentFetch, residentStatus, stopResidentService,
+  ensureResidentService, residentLogin, residentFetch, residentStatus, stopResidentService, logoutResidentSession,
   residentRpc, residentServicePaths, residentAccountHash, readResidentOwner, cleanDeadResident,
   prepareResidentDirectory, RESIDENT_INPUT_LIMIT, RESIDENT_OUTPUT_LIMIT,
 } from "../src/client/resident-service.js";
@@ -347,3 +347,40 @@ it("does not retry post-write validation, timeout or cancellation failures maske
     });
   }
 });
+
+it("logout holds startup coordination through browser closure and credential deletion", () => running(async ({config: cfg, path, session, engine, lifetime}) => {
+  const closing = deferred(); const releaseClose = deferred();
+  engine.close = async () => { engine.closes++; closing.resolve(); await releaseClose.promise; engine.active = false; };
+  const logout = logoutResidentSession(path);
+  await closing.promise;
+  const queued = ensureResidentService(cfg, {userId: session.userId, authGeneration: session.authGeneration});
+  // Attach rejection handling before releasing the old daemon so no startup can
+  // escape the cached-session check once logout deletes authentication state.
+  const rejected = assert.rejects(queued, AuthError);
+  releaseClose.resolve();
+  await logout;
+  await rejected;
+  await lifetime;
+  assert.equal(engine.closes, 1);
+  assert.equal(await loadSession(path), null);
+  assert.equal(await readResidentOwner(residentServicePaths(path)), null);
+  assert.deepEqual(await residentStatus(path), {running: false, authenticated: false, needsLogin: true});
+}));
+
+it("normal-command startup rejects a replaced cached account or generation before daemon reuse", () => running(async ({config: cfg, path, session, engine}) => {
+  for (const expected of [{userId: "999", authGeneration: session.authGeneration}, {userId: session.userId, authGeneration: randomUUID()}]) {
+    await assert.rejects(ensureResidentService(cfg, expected), AuthError);
+  }
+  assert.equal(engine.starts, 1);
+  assert.equal(engine.logins, 0);
+}));
+
+it("logout refuses an unrecognized live socket instead of clearing credentials beneath it", () => running(async ({path}) => {
+  const paths = residentServicePaths(path);
+  const owner = await readFile(paths.owner, "utf8");
+  await rm(paths.owner);
+  try {
+    await assert.rejects(logoutResidentSession(path), /unrecognized resident socket/);
+    assert.ok(await loadSession(path));
+  } finally { await writeFile(paths.owner, owner, {mode: 0o600}); }
+}));

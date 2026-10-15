@@ -91,10 +91,18 @@ export class ResidentBrowser {
     // Three bounded phases: request, one silent recovery, one GET retry. Queue time is included.
     return this.budget(signal, 50_000, active => this.enqueue(active, async () => {
       if (!this.authenticated || !this.pair) throw humanRequired();
+      const semanticRead = isRead(normalized);
+      let recovered = false;
+      if (!this.retailerPage()) {
+        // No mutation was sent. A caller must explicitly recover authentication first.
+        if (!semanticRead) throw humanRequired();
+        await this.recoverRead(active);
+        recovered = true;
+      }
       if (normalized.method === "POST" && new URL(normalized.url).pathname === `${BASKET}/item` || normalized.method === "PUT") {
         await this.guardAmendment(normalized,active);
       }
-      return this.readOrRequest(normalized, active);
+      return this.readOrRequest(normalized, active, !recovered);
     }));
   }
 
@@ -188,10 +196,12 @@ export class ResidentBrowser {
     this.page = context.pages()[0] ?? await context.newPage();
     this.userAgent = await raceAbort(this.page.evaluate(() => navigator.userAgent),signal);
     if (this.current) {
+      const existing = await raceAbort(context.cookies(),signal);
       const cookies = this.current.cookies.filter(c => {
         const domain = c.domain.replace(/^\./, "");
         return (domain === "sainsburys.co.uk" || domain.endsWith(".sainsburys.co.uk")) &&
-          (c.expires === undefined || c.expires === -1 || c.expires > Date.now() / 1000);
+          (c.expires === undefined || c.expires === -1 || c.expires > Date.now() / 1000) &&
+          !existing.some(p => p.name === c.name && p.domain === c.domain && p.path === c.path);
       });
       if (cookies.length) await context.addCookies(cookies.map(c => ({ ...c, expires: c.expires ?? -1 })));
     }
@@ -255,7 +265,6 @@ export class ResidentBrowser {
       // A browser challenge may refresh cookies without changing either token.
       const latestCookies = JSON.stringify(await raceAbort(this.context!.cookies(),signal));
       if (latestCookies !== cookieState) { tried.clear(); cookieState = latestCookies; }
-      if (!interactive && await this.humanForm()) throw humanRequired();
       for (const candidate of [...this.candidates].reverse()) {
         const key = `${candidate.wc}\n${candidate.bearer}`;
         if (tried.has(key) || (attempts.get(key) ?? 0) >= 3) continue;
@@ -280,6 +289,9 @@ export class ResidentBrowser {
           if (!(error instanceof AuthError) && !(error instanceof ResponseValidationError)) throw error;
         }
       }
+      // A normal shopping page may contain postcode or voucher fields. Verify
+      // available credentials before treating an actual sign-in form as decisive.
+      if (!interactive && await this.humanForm()) throw humanRequired();
       await this.wait(signal);
     }
   }
@@ -289,7 +301,7 @@ export class ResidentBrowser {
     try {
       const url = new URL(this.page.url());
       if (url.origin === "https://account.sainsburys.co.uk" && url.pathname.startsWith("/gol/login")) return true;
-      return await this.page.locator('input[name="password"], input[type="password"], input[autocomplete="one-time-code"], input[name*="code" i]').first().isVisible();
+      return await this.page.locator('input[type="password"], input[autocomplete="one-time-code"]').first().isVisible();
     } catch { return false; }
   }
 
@@ -319,14 +331,29 @@ export class ResidentBrowser {
     return id;
   }
 
-  private async readOrRequest(input: ResidentRequest, signal: AbortSignal): Promise<ResidentResponse> {
-    const result = await this.fetch(input,this.pair!,signal);
-    const semanticRead = input.method === "GET" || input.method === "POST" && new URL(input.url).pathname === SLOT_LIST;
-    if (!semanticRead || result.status !== 401 && result.status !== 403) return result;
+  private retailerPage(): boolean {
+    try { return !!this.page && new URL(this.page.url()).origin === ORIGIN; }
+    catch { return false; }
+  }
+
+  private async recoverRead(signal: AbortSignal): Promise<void> {
     await this.window(false);
     await this.navigate(signal);
     await this.authenticate(signal,false,false);
     check(signal);
+  }
+
+  private async readOrRequest(input: ResidentRequest, signal: AbortSignal, allowRecovery = true): Promise<ResidentResponse> {
+    const canRecover = allowRecovery && isRead(input);
+    try {
+      const result = await this.fetch(input,this.pair!,signal);
+      if (!canRecover || result.status !== 401 && result.status !== 403) return result;
+    } catch (error) {
+      // A navigation between the Node precheck and renderer dispatch sends no
+      // request. Treat it as authentication loss, with one silent read recovery.
+      if (!canRecover || !(error instanceof AuthError)) throw error;
+    }
+    await this.recoverRead(signal);
     return this.fetch(input,this.pair!,signal);
   }
 
@@ -362,16 +389,21 @@ export class ResidentBrowser {
     try {
       const reply = await raceAbort(this.page.evaluate(rendererFetch,{id,url:input.url,method:input.method,headers,body:input.body,timeoutMs:15_000,maxBytes:4*1024*1024}),signal);
       if ("error" in reply) {
+        if (reply.error === "origin") throw humanRequired();
         if (reply.error === "cancelled") throw new RequestCancelledError();
         if (reply.error === "deadline") throw new RequestTimeoutError();
         throw new ResponseValidationError("The resident browser could not complete a confined retailer request.");
       }
       return reply;
     } catch(error) {
-      if(error instanceof RequestCancelledError || error instanceof RequestTimeoutError || error instanceof ResponseValidationError)throw error;
+      if(error instanceof AuthError || error instanceof RequestCancelledError || error instanceof RequestTimeoutError || error instanceof ResponseValidationError)throw error;
       throw new ResponseValidationError("The resident browser request failed; inspect the basket before retrying a write.");
     } finally {signal.removeEventListener("abort",cancel);}
   }
+}
+
+function isRead(input: ResidentRequest): boolean {
+  return input.method === "GET" || input.method === "POST" && new URL(input.url).pathname === SLOT_LIST;
 }
 
 function validateRequest(input:ResidentRequest):ResidentRequest {
