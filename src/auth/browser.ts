@@ -9,6 +9,8 @@ export interface LaunchOptions {
   sessionPath: string;
   accountEmail?: string;
   headless: boolean;
+  /** Start headed Chromium minimized for the resident session owner. */
+  minimized?: boolean;
   /** false uses a fresh private profile removed when the context closes. */
   persist?: boolean;
 }
@@ -53,6 +55,8 @@ export async function launchContext(opts: LaunchOptions): Promise<BrowserContext
       throwIfInterrupted();
       return chromium.launchPersistentContext(userDataDir, {
         headless: opts.headless,
+        timeout: 15_000,
+        ...(opts.minimized ? {args:["--start-minimized"]} : {}),
         // Our lifecycle handler closes the browser before releasing its profile lock.
         handleSIGINT: false,
         handleSIGTERM: false,

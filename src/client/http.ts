@@ -82,6 +82,10 @@ export interface ClientDeps {
   sessionPath?: string;
   /** Read requests only. Concurrent rejected reads share one refresh. */
   reauth?: () => Promise<Session>;
+  /** Overall request budget; resident reads include bounded browser session recovery. */
+  defaultTimeoutMs?: number;
+  /** Internal resident adapter returns typed failure categories, never raw browser errors. */
+  trustedTransportErrors?: boolean;
 }
 
 export class GroceriesClient {
@@ -91,6 +95,8 @@ export class GroceriesClient {
   private refreshing?: Promise<void>;
   private readonly sessionPath?: string;
   private readonly authenticationIdentity: string;
+  private readonly defaultTimeoutMs: number;
+  private readonly trustedTransportErrors: boolean;
   private queue: Promise<unknown> = Promise.resolve();
 
   constructor(deps: ClientDeps) {
@@ -102,6 +108,8 @@ export class GroceriesClient {
     if (deps.sessionPath && deps.reauth) throw new Error("Managed cached sessions require explicit local login.");
     this.sessionPath = deps.sessionPath ? resolve(deps.sessionPath) : undefined;
     this.authenticationIdentity = authenticationIdentity(deps.session);
+    this.defaultTimeoutMs = boundedInteger(deps.defaultTimeoutMs, DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS, "request deadline");
+    this.trustedTransportErrors = deps.trustedTransportErrors === true;
   }
 
   getSession(): Session { return this.session; }
@@ -110,7 +118,7 @@ export class GroceriesClient {
   async request<T = unknown>(path: string, opts: HttpOptions<T> = {}): Promise<T> {
     // Validate everything we can before starting a request or reading credentials.
     const url = this.buildUrl(path, opts.query);
-    const timeoutMs = boundedInteger(opts.timeoutMs, DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS, "request deadline");
+    const timeoutMs = boundedInteger(opts.timeoutMs, this.defaultTimeoutMs, MAX_TIMEOUT_MS, "request deadline");
     const maxBytes = boundedInteger(opts.maxResponseBytes, DEFAULT_RESPONSE_BYTES, MAX_RESPONSE_BYTES, "response size limit");
     const isRead = (opts.method ?? "GET") === "GET" || opts.semanticRead === true;
     if (opts.semanticRead) {
@@ -211,8 +219,15 @@ export class GroceriesClient {
       // An adapter that ignores abort must not deliver a late response to the jar.
       void pending.then(late => { if (signal.aborted) void late.body?.cancel().catch(() => {}); }, () => {});
       response = await abortable(pending, signal);
-    } catch {
+    } catch (error) {
       if (signal.aborted) throw new RequestCancelledError();
+      if (this.trustedTransportErrors) {
+        // Retain categories while replacing every adapter-provided message.
+        if (error instanceof RequestCancelledError) throw new RequestCancelledError();
+        if (error instanceof RequestTimeoutError) throw new RequestTimeoutError();
+        if (error instanceof ResponseValidationError) throw new ResponseValidationError("The resident browser refused an unsafe or invalid retailer response.");
+        if (error instanceof AuthError) throw new AuthError(error.status === 403 ? 403 : 401);
+      }
       throw new ApiError(0, "The retailer request could not be completed.");
     }
     // Native fetch is instructed not to follow redirects. Also reject a fetch adapter that followed one anyway.
@@ -303,8 +318,6 @@ export class GroceriesClient {
       authorization: `Bearer ${this.session.bearerToken}`, "content-type": "application/json",
       "enabled-feature-flags": ENABLED_FEATURE_FLAGS,
       origin: RETAILER_ORIGIN, referer: `${RETAILER_ORIGIN}/gol-ui/`,
-      "sec-ch-ua": '"Chromium";v="146", "Not_A Brand";v="24"',
-      "sec-ch-ua-mobile": "?0", "sec-ch-ua-platform": '"Linux"',
       "sec-fetch-dest": "empty", "sec-fetch-mode": "cors", "sec-fetch-site": "same-origin",
       "user-agent": this.session.userAgent, wcauthtoken: this.session.wcauthtoken,
       cookie: new SessionCookies(this.session.cookies).header(url),

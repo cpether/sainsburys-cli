@@ -1,6 +1,8 @@
 # Supervised live validation
 
-Status on 15 October 2026: two approved reversible pilots have run. Neither was a clean end-to-end pass. The second pilot, on cookie-hardened commit `b8e35ca`, stopped after its first add because immediate readback failed and fresh CLI reads required authentication. The website showed the added item. Explicit local login restored API access, and a fresh removal plan passed immediate verification. A separate CLI read and the website both confirmed the original empty basket. No amendment, slot change, checkout or payment occurred. Further live write pilots are paused pending a diagnosis of the retained authentication/HTTP approach.
+Status on 15 October 2026: the first two approved pilots failed immediate verification and were recovered to an empty basket. Continuing diagnosis reproduced a third removal failure with status-only instrumentation: the write returned HTTP 200, its immediate basket GET returned HTTP 500 JSON, and the next profile read returned HTTP 401. Add, repeated-plan idempotence and quantity update passed during that same run. The website confirmed removal. Fresh API confirmation of that third restoration remains pending until authentication is recovered.
+
+A resident-browser implementation is now under test. It keeps one dedicated headed Chromium process alive and minimized, with explicit manual login, browser-backed API requests and bounded read-only recovery. This preserves the existing API modules and plan authorization. Live acceptance of that implementation is still pending; automated tests alone do not establish reliability.
 
 The earlier generic login failure was followed by a verification failure. Claude independently reproduced an adapter bug with multiple Set-Cookie headers using real Playwright HTTP and a dummy loopback server. The fixed adapter and refreshed-cookie export were followed by successful live login and cached reads. The unslotted reservation also omitted `is_expired`; the parser now accepts that observed form while requiring an explicit expiry flag whenever a slot is present. Synthetic regression fixtures preserve the field layout without account values. No real session, HAR or raw profile response is checked in.
 
@@ -38,7 +40,17 @@ The target-two and repeated-plan steps were not attempted in this pilot. Restora
 
 The cookie fix did not establish dependable live writes. A newly verified login supported preflight reads and planning, then API access was rejected after the first add. Removal after another explicit login did verify successfully, so verification does not fail universally. The failure pattern is not yet characterised. The immediate readback error does not identify its underlying transport/status cause; the subsequent fresh read established authentication rejection. No raw response or credential-bearing trace was retained. These observations do not prove a bot challenge, bearer expiry, missing header or any other cause.
 
-Stop further write experiments here. Before replacing the retained login/HTTP implementation, explain this evidence and compare bounded, read-only requests through the retained HTTP client and the authenticated dedicated browser. Any diagnostic must emit only fixed endpoint labels, status/content-type categories and sanitized schema results. Preserve useful API shapes and dummy fixtures; do not collect HARs or token-bearing headers. Propose the transport change based on that comparison rather than continuing speculative patches.
+At that point write experiments were paused. The person subsequently requested continued work. The diagnosis below records the additional evidence before changing the transport. Any diagnostic must emit only fixed endpoint labels, status/content-type categories and sanitized schema results. Preserve useful API shapes and dummy fixtures; do not collect HARs or token-bearing headers. Propose the transport change based on that comparison rather than continuing speculative patches.
+
+## Diagnosis after the second pilot
+
+The person requested continued work and fewer login interruptions. The same approved item and two-item/£1.30 limits were retained. Three fresh cached identity/context/basket rounds passed without login. A new zero-to-one plan passed write and immediate readback, repeating it reported zero writes, and a one-to-two plan passed. Website quantities and totals matched both steps.
+
+A fresh two-to-zero plan returned HTTP 200 for its PUT, then HTTP 500 JSON for the immediate basket GET. The CLI returned an unknown outcome. A fresh identity read then returned HTTP 401. The mutation was not retried; the website showed an empty trolley. These fixed status categories distinguish the actual failed readback from the later authentication rejection. No raw response, cookie value, header, token or account identifier was logged.
+
+A bounded headless reuse attempt reached a browser challenge and sent no authenticated API requests. A headed minimized reuse attempt reached the real sign-in form, including after restoring nonexpired cached cookies. Neither attempt requested credentials in a tool or opened repeated interactive login flows. The saved state cannot currently establish the account without fresh participation. Repeatedly launching login is therefore not a dependable recovery strategy.
+
+The resident-browser approach keeps the browser process and website JavaScript session alive after one explicit sign-in. The existing request shapes, response validators, target plans and spending/amendment guards remain. A read may renew the website session once after a 401/403; a basket mutation is sent once. Transient post-write verification may repeat one GET. Authentication required by the retailer still needs human participation through explicit `auth login`; ordinary commands leave the window minimized and return a sanitized error rather than opening sign-in.
 
 ## Login and reads
 
@@ -54,13 +66,13 @@ Stop further write experiments here. Before replacing the retained login/HTTP im
    ```
 
    Enter the password and MFA only in the opened Chromium window. Never paste either into the assistant conversation, a command argument or a plan file.
-   If sign-in finishes but the terminal is waiting, open Trolley in the same window. Expect `Authenticated API credentials captured; verifying account identity.` followed by verified login success. If it fails, record only the sanitized terminal error, whether that progress message appeared, and whether the window reached the account/trolley page. Keep the existing dedicated profile for retry; do not delete authentication state as a troubleshooting step.
+   If sign-in finishes but the terminal is waiting, open Trolley in the same window. Expect verified login success; the dedicated browser then minimizes and stays running for later commands. If it fails, record only the sanitized terminal error, whether the window reached the account/trolley page. Keep the existing dedicated profile for retry; do not delete authentication state as a troubleshooting step.
 2. Run `--json customer profile`, `--json customer context`, `--json slot current`, `--json product search oats` and `--json basket show`. Confirm the intended account, selected store/reservation, product prices and basket quantities against the normal website. If the store is unknown, compare the website before providing `--store`.
 3. Keep a private original basket snapshot and record the chosen item's original quantity, unit and catchweight. Check `order status` and confirm amend mode is false. Stop if either amendment flag is true or context differs from the website.
 
 ## One approved reversible sequence
 
-The assistant must first show you the specific SKU, product name, original quantity, units, test target quantities, delivery context, estimated basket totals and limits. You must approve that item and sequence before any live write. Choose a low-cost ordinary `ea` item, ideally absent initially; maximum test quantity two. The two pilots above had separate approvals. Neither approval authorizes another pilot. The instructions below describe the workflow for a future approved test after the current reliability investigation.
+The assistant must first show you the specific SKU, product name, original quantity, units, test target quantities, delivery context, estimated basket totals and limits. You must approve that item and sequence before any live write. Choose a low-cost ordinary `ea` item, ideally absent initially; maximum test quantity two. The two pilots above had separate approvals. The person then authorized continued diagnosis within the same specific item, quantities and limits. The instructions below remain the workflow for any future test; a different item or broader limit requires its own approval.
 
 For an initially absent approved item, generate and review a separate constrained plan for each step:
 
@@ -73,9 +85,9 @@ Use the README `basket plan`/`basket apply --approve` commands for every step. A
 
 ## Session reuse and decision point
 
-Run a fresh CLI process to read the identity and basket using the cached session. After natural session expiry, confirm that a read returns an authentication/challenge error without starting another browser or mutation. Run explicit local login and verify identity/basket again. A later supervised read on another occasion gives better evidence than immediate reuse alone.
+Run a fresh CLI process to read the identity and basket using the cached session. After API credential expiry, allow one bounded silent renewal through the resident browser. If Sainsbury's requires human authentication, confirm the command returns a sanitized error without showing a login window or repeating a mutation. Run explicit local login only then and verify identity/basket again. A later supervised read on another occasion gives better evidence than immediate reuse alone.
 
-A clean mutation/readback sequence after cookie hardening failed in the second pilot. Longer session reuse, natural expiry behavior, booked-slot context and weighted/catchweight products remain unverified. Keep the original account state unchanged while those checks are pending.
+The second and third HTTP-based pilots did not complete clean verification. Resident-browser live acceptance remains pending. Longer session reuse, natural expiry behavior, booked-slot context and weighted/catchweight products remain unverified. Keep the original account state unchanged while those checks are pending.
 
 If login cannot establish identity, ordinary browser use works but direct HTTP replay is consistently challenged, or verified basket writes remain unreliable, stop after a bounded pilot. Record sanitized endpoint shapes, response status/content type, the operation and observed website state. Never store token-bearing headers, passwords, MFA codes, cookies, HARs or full account screenshots in the repository. Explain that evidence before replacing authentication or transport. Preserve the useful request shapes and sanitized fixtures.
 

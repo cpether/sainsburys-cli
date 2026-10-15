@@ -28,9 +28,19 @@ export function printError(err:unknown):void {
     const detail = err && typeof err === "object" ? err as Record<string,unknown> : {};
     process.stdout.write(terminalSafe(JSON.stringify({ok:false,error:{code:err instanceof Error?err.name:"Error",message},
       ...(detail.outcome ? {outcome:detail.outcome} : exitCodeFor(err)===5 ? {outcome:"unknown"} : {}),
-      ...(typeof detail.verifiedChanges === "number" ? {verifiedChanges:detail.verifiedChanges} : {})}))+"\n");
+      ...(typeof detail.verifiedChanges === "number" ? {verifiedChanges:detail.verifiedChanges} : {}),
+      ...readbackDetail(detail.readbackFailure)}))+"\n");
   }
   else process.stderr.write(terminalSafe(`error: ${message}\n`));
+}
+/** Emit only fixed diagnostic categories and numeric status, never underlying errors. */
+function readbackDetail(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object") return {};
+  const detail = value as Record<string, unknown>;
+  if (typeof detail.category !== "string" || !["authentication", "http", "network", "local_state", "timeout", "cancelled", "validation", "unknown"].includes(detail.category)) return {};
+  const status = detail.httpStatus;
+  return { readbackFailure: { category: detail.category,
+    ...(typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599 ? { httpStatus: status } : {}) } };
 }
 export function formatMoney(value:number|undefined):string {return value===undefined||value===null?"-":`£${value.toFixed(2)}`;}
 export function shortDate(iso:string|undefined):string {return iso?iso.replace("T"," ").replace(/Z$/," UTC"):"-";}
