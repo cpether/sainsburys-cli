@@ -1,9 +1,9 @@
-import { type BrowserContext, type Request } from "playwright";
+import { errors, type BrowserContext, type Request } from "playwright";
 import { resolve } from "node:path";
 import type { Config } from "../config.js";
 import { launchContext, type LaunchOptions } from "./browser.js";
 import { type Session, type SessionCookie, parseWcauthtoken, saveSession, withAuthLock } from "./session.js";
-import { GroceriesClient } from "../client/http.js";
+import { ApiError, AuthError, GroceriesClient, RequestTimeoutError, ResponseValidationError } from "../client/http.js";
 import { MFA_INSTRUCTIONS } from "./mfa-providers.js";
 import { registerCleanup, throwIfInterrupted } from "./lifecycle.js";
 
@@ -20,7 +20,9 @@ export interface LoginOptions {
 
 const activeLogins = new Map<string, Promise<Session>>();
 const ORIGIN = "https://www.sainsburys.co.uk";
-class LocalLoginError extends Error {}
+class LocalLoginError extends Error {
+  constructor(message: string) { super(message); this.name = "LocalLoginError"; }
+}
 
 /** A single manual login per session path, including callers in the same process. */
 export function performLogin(opts: LoginOptions): Promise<Session> {
@@ -68,13 +70,16 @@ async function captureLogin(opts: LoginOptions, email: string, log: (msg: string
   const close = () => closing ??= context.close();
   const unregister = registerCleanup(close);
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let stage = "opening the browser page";
   try {
     throwIfInterrupted();
     const page = await context.newPage();
     let wcauthtoken: string | undefined;
     let bearerToken: string | undefined;
     let resolveTokens!: () => void;
-    const tokens = new Promise<void>((resolve) => { resolveTokens = resolve; });
+    let rejectTokens!: (error: Error) => void;
+    const tokens = new Promise<void>((resolve, reject) => { resolveTokens = resolve; rejectTokens = reject; });
+    const onClosed = () => rejectTokens(new LocalLoginError("Login browser closed before authenticated credentials were captured. Retry auth login."));
     const onRequest = (req: Request) => {
       let url: URL;
       try { url = new URL(req.url()); } catch { return; }
@@ -89,6 +94,7 @@ async function captureLogin(opts: LoginOptions, email: string, log: (msg: string
       if (wcauthtoken && bearerToken) resolveTokens();
     };
     page.on("request", onRequest);
+    page.on("close", onClosed);
     const deadline = new Promise<never>((_, reject) => {
       timer = setTimeout(() => reject(new LocalLoginError("Local login timed out. Complete login and MFA in the browser, then retry auth login.")), opts.timeoutMs ?? 300_000);
     });
@@ -96,21 +102,26 @@ async function captureLogin(opts: LoginOptions, email: string, log: (msg: string
     try {
       await Promise.race([
         (async () => {
-          await page.goto(`${ORIGIN}/gol-ui/my-account/orders`, { waitUntil: "domcontentloaded", timeout: 30_000 });
+          stage = "opening the account page";
+          const navigation = page.goto(`${ORIGIN}/gol-ui/my-account/orders`, { waitUntil: "domcontentloaded", timeout: 30_000 }).catch((error: unknown) => {
+            // Login/MFA and SPA redirects need not complete within a document-load
+            // deadline. The credential event and identity read determine success.
+            if (!(error instanceof errors.TimeoutError)) throw error;
+          });
+          await Promise.race([navigation, tokens]);
+          stage = "waiting for authenticated API credentials";
           if (!wcauthtoken || !bearerToken) {
-            // Reused profiles can serve a cached account page with no API bootstrap.
-            // Wait for the user's login redirect, then visit the trolley to capture a
-            // fresh authenticated request. Never navigate away while MFA is being entered.
-            await page.waitForURL((url) => url.origin === ORIGIN && url.pathname.startsWith("/gol-ui/"), {
-              timeout: opts.timeoutMs ?? 300_000,
-            });
-            await page.goto(`${ORIGIN}/gol-ui/trolley`, { waitUntil: "domcontentloaded", timeout: 30_000 });
+            // A /gol-ui/ URL can appear before the SPA starts its login redirect.
+            // Never force another navigation while the user may be entering MFA.
+            log("After completing login and MFA, open Trolley in this browser window if the terminal is still waiting.");
           }
           await tokens;
         })(),
         deadline,
       ]);
       if (!wcauthtoken || !bearerToken) throw new LocalLoginError("Login did not capture authenticated API credentials.");
+      log("Authenticated API credentials captured; verifying account identity.");
+      stage = "reading browser session state";
       const cookies = (await context.cookies()).filter((c) => {
         const domain = c.domain.replace(/^\./, "");
         return domain === "sainsburys.co.uk" || domain.endsWith(".sainsburys.co.uk");
@@ -138,6 +149,7 @@ async function captureLogin(opts: LoginOptions, email: string, log: (msg: string
           return new Response(await result.body(), { status: result.status(), headers: result.headers() });
         },
       });
+      stage = "account verification";
       const result: unknown = await client.request("/groceries-api/gol-services/customer/v1/customer/profile");
       const profile = identityProfile(result);
       if (String(profile.user_id) !== session.userId || profile.email.trim().toLowerCase() !== email) {
@@ -148,10 +160,20 @@ async function captureLogin(opts: LoginOptions, email: string, log: (msg: string
       return session;
     } finally {
       page.off("request", onRequest);
+      page.off("close", onClosed);
     }
   } catch (err) {
     if (err instanceof LocalLoginError) throw err;
-    throw new LocalLoginError("Local browser login failed. Check the browser window and retry auth login; credentials were not persisted.");
+    // Classify only errors with known, sanitized semantics. Never include raw
+    // Playwright messages, URLs, response bodies or authentication headers.
+    let detail = `failed during ${stage}`;
+    if (stage === "account verification") {
+      if (err instanceof AuthError) detail = `failed during account verification: retailer rejected the read (HTTP ${err.status})`;
+      else if (err instanceof ResponseValidationError) detail = `failed during account verification: ${err.message}`;
+      else if (err instanceof ApiError) detail = `failed during account verification: ${err.status ? `HTTP ${err.status}` : "network or browser transport failure"}`;
+      else if (err instanceof RequestTimeoutError) detail = "failed during account verification: the read exceeded its 15-second deadline";
+    }
+    throw new LocalLoginError(`Local browser login ${detail}. Session credentials were not saved. Retry auth login; share only this sanitized error if it fails again.`);
   } finally {
     if (timer) clearTimeout(timer);
     // Browser errors can include URLs and page contents. Do not expose those details.

@@ -23,6 +23,10 @@ The automated suite executes application modules and the CLI with dummy credenti
 
 Final checks: clean lockfile install, typecheck, build and 138 automated tests pass. `npm audit --audit-level=low` reports zero vulnerabilities, including development dependencies. CI uses Node 22/24 on Linux/macOS. The local run used Node 25.8.1 on macOS; remote CI results are recorded on the draft PR.
 
+### First supervised login attempt
+
+The user subsequently reported apparent browser sign-in followed by a generic terminal failure. The live cause remains unconfirmed. Offline reproductions showed that a document-load timeout after credential capture and a rejected verification read both produced that same error. The follow-up fix lets authenticated API activity proceed to identity verification independently of document load, tolerates the navigation timeout while the person signs in, and removes the premature automatic trolley navigation. It reports safe failure stages and sanitized verification status/response reasons without retaining diagnostics. The original dedicated profile is preserved for retry. All 146 automated tests, typecheck and build pass, with zero dependency audit findings. Successful live login, cached HTTP replay and all basket validation remain pending.
+
 ## Independent review
 
 Implementation agents owned separate auth, HTTP and basket modules. The HTTP reviewer independently reviewed authentication and basket plans, and the auth reviewer independently reviewed the other API/context/CLI modules. Material findings fixed and tested include temporary-profile cleanup suppression, trusting a caller-supplied spending estimate, plan deserialization bypasses of unit/catchweight checks, mismatched product identity on sain-only lines, malformed basket readback classified too weakly, conflicting product slot overrides and stale reservation times. A final identifier-shape test covers a new item returned with only nested `product.sain_id`. No material review blocker remained at delivery.
