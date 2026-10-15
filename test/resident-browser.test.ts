@@ -195,6 +195,53 @@ describe("resident session recovery and cancellation",()=>{
 });
 
 describe("resident lifecycle regressions",()=>{
+  async function failedRecovery(f:ReturnType<typeof fakeBrowser>,e:ResidentBrowser) {
+    await e.start({interactive:false,timeoutMs:500});const original=f.handler;
+    f.handler=async(url,init)=>{
+      if(url===PRODUCT){f.state.signedIn=false;return new Response('{}',{status:401});}
+      return original(url,init);
+    };
+    await assert.rejects(e.request({url:PRODUCT,method:"GET",headers:{}}),AuthError);
+    assert.equal(e.getSession(),undefined);
+    f.handler=original;f.state.signedIn=true;f.setUrl(`${ORIGIN}/gol-ui/trolley`);
+  }
+  it("silently verifies a resumed retained browser after failed recovery while keeping unauthenticated writes blocked",()=>setup(async(f,e,dir)=>{
+    await failedRecovery(f,e);const visits=f.visits.length;const before=f.calls.length;
+    f.context.emit("request",{url:()=>`${ORIGIN}/groceries-api/test`,headers:()=>({wcauthtoken:fakeSession().wcauthtoken,authorization:"Bearer resumed"})});
+    await assert.rejects(e.request({url:`${BASKET}/item${WRITE_QUERY}`,method:"POST",headers:{},body:JSON.stringify(change)}),AuthError);
+    assert.equal(f.calls.length,before);
+    const saved=await loadSession(join(dir,"session.json"));
+    assert.equal((await e.request({url:PRODUCT,method:"GET",headers:{}})).status,200);
+    assert.equal(e.getSession()!.bearerToken,"resumed");assert.equal(f.visits.length,visits);assert.equal(f.shows,0);
+    assert.deepEqual(e.getSessionBinding(),{userId:saved!.userId,authGeneration:saved!.authGeneration});
+  }));
+  it("does not adopt a wrong-account pair while recovering an unauthenticated retained browser",()=>setup(async(f,e,dir)=>{
+    await failedRecovery(f,e);const saved=await loadSession(join(dir,"session.json"));
+    f.state.inputs=[{name:"secret",type:"password"}];
+    f.context.emit("request",{url:()=>`${ORIGIN}/groceries-api/test`,headers:()=>({wcauthtoken:fakeSession().wcauthtoken,authorization:"Bearer wrong-account"})});
+    f.handler=async(_url,init)=>new Headers(init.headers).get("authorization")==="Bearer wrong-account"?
+      new Response('{"user_id":"999","email":"other@example.invalid"}',{headers:{"content-type":"application/json"}}):new Response('{}',{status:401});
+    await assert.rejects(e.request({url:PRODUCT,method:"GET",headers:{}}),AuthError);
+    assert.equal(e.getSession(),undefined);assert.equal(f.shows,0);
+    assert.deepEqual(e.getSessionBinding(),{userId:saved!.userId,authGeneration:saved!.authGeneration});
+    assert.deepEqual(await loadSession(join(dir,"session.json")),saved);
+  }));
+  it("cancels resumed-browser credential verification without authenticating or writing late",()=>setup(async(f,e,dir)=>{
+    await failedRecovery(f,e);const saved=await loadSession(join(dir,"session.json"));
+    f.context.emit("request",{url:()=>`${ORIGIN}/groceries-api/test`,headers:()=>({wcauthtoken:fakeSession().wcauthtoken,authorization:"Bearer resumed"})});
+    let ready!:()=>void;const started=new Promise<void>(resolve=>{ready=resolve;});let cancelled=false;
+    f.handler=async(_url,init)=>{ready();return new Promise((_,reject)=>init.signal!.addEventListener("abort",()=>{cancelled=true;reject(new Error("dummy"));},{once:true}));};
+    const controller=new AbortController();const pending=e.request({url:PRODUCT,method:"GET",headers:{}},controller.signal);
+    await started;controller.abort();await assert.rejects(pending,RequestCancelledError);await pause(5);
+    assert.equal(cancelled,true);assert.equal(e.getSession(),undefined);assert.equal(f.shows,0);
+    assert.deepEqual(await loadSession(join(dir,"session.json")),saved);
+  }));
+  it("attempts only one recovery when an unauthenticated browser resumes but its read remains rejected",()=>setup(async(f,e)=>{
+    await failedRecovery(f,e);const original=f.handler;const visits=f.visits.length;let reads=0;
+    f.handler=async(url,init)=>url===PRODUCT?(reads++,new Response('{}',{status:401})):original(url,init);
+    assert.equal((await e.request({url:PRODUCT,method:"GET",headers:{}})).status,401);
+    assert.equal(reads,1);assert.equal(f.visits.length,visits+1);assert.equal(f.shows,0);
+  }));
   it("verifies a newer observed credential pair before navigating on a rejected read",()=>setup(async(f,e)=>{
     await e.start({interactive:false,timeoutMs:500});const original=f.handler;const visits=f.visits.length;
     const epoch=e.getSession()!.authGeneration;

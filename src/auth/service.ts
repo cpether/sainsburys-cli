@@ -15,6 +15,7 @@ export interface ResidentEngine {
   login(options?: { signal?: AbortSignal; timeoutMs?: number }): Promise<Session>;
   request(input: { url: string; method: string; headers: Record<string, string>; body?: string }, signal?: AbortSignal): Promise<{ status: number; headers: Record<string, string>; body: string }>;
   getSession(): Session | undefined;
+  getSessionBinding?(): { userId: string; authGeneration?: string } | undefined;
   status(): { authenticated: boolean; needsLogin: boolean };
   close(): Promise<void>;
 }
@@ -159,8 +160,11 @@ export async function runResidentService(config: Config, engineFactory: Resident
               return { user_id: loggedIn.userId };
             }
             if (operation !== "request") throw new Error("Invalid resident operation.");
-            const active = engine!.getSession();
-            if (!active || typeof input.authGeneration !== "string" || input.authGeneration !== active.authGeneration || input.expectedUserId !== active.userId) throw new AuthError(401);
+            // Failed silent refresh retains only the account/epoch binding. The
+            // engine still validates each operation and refuses unauthenticated
+            // writes, while a later read may recover in its existing context.
+            const binding = engine!.getSession() ?? engine!.getSessionBinding?.();
+            if (!binding || typeof input.authGeneration !== "string" || input.authGeneration !== binding.authGeneration || input.expectedUserId !== binding.userId) throw new AuthError(401);
             const request = record(input.request);
             if (typeof request.url !== "string" || typeof request.method !== "string" || (request.body !== undefined && typeof request.body !== "string")) throw new Error("Invalid resident request.");
             const sourceHeaders = record(request.headers);

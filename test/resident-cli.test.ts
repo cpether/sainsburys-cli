@@ -9,8 +9,9 @@ import { runResidentService } from '../src/auth/service.js';
 import { residentStatus, stopResidentService } from '../src/client/resident-service.js';
 import { saveSession } from '../src/auth/session.js';
 import { fakeSession } from './_helpers.js';
+import { AuthError } from '../src/client/http.js';
 
-async function invoke(home: string, path: string, args: string[]) {
+async function invoke(home: string, path: string, args: string[], expectedExit = 0) {
   const child = spawn(process.execPath, ['--import', 'tsx', resolve('src/cli/index.ts'), '--json', ...args], {
     env: { PATH: process.env.PATH, HOME: home, SAINSBURYS_SESSION_PATH: path, SAINSBURYS_EMAIL: 'dummy@example.invalid' },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -21,7 +22,7 @@ async function invoke(home: string, path: string, args: string[]) {
   const timer = setTimeout(() => child.kill('SIGKILL'), 12_000);
   const exit = await new Promise<number | null>((done, reject) => { child.once('error', reject); child.once('exit', done); });
   clearTimeout(timer);
-  assert.equal(exit, 0, stdout + stderr);
+  assert.equal(exit, expectedExit, stdout + stderr);
   assert.doesNotMatch(stdout + stderr, /test-jwt|AbCdEfGh|WC_AUTHENTICATION|abck-token/);
   return JSON.parse(stdout);
 }
@@ -126,6 +127,46 @@ test('explicit CLI login retains the browser, subsequent reads do not log in, an
     assert.equal((await loadSession(path))?.browserManaged, true);
     await invoke(home, path, ['auth', 'logout']);
     assert.equal(await loadSession(path), null);
+  } finally {
+    await stopResidentService(path).catch(() => {}); await running.catch(() => {});
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+
+test('a later CLI read recovers through the retained engine after an earlier silent recovery failed', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'sainsburys-resident-recovery-cli-'));
+  const path = join(home, 'session.json');
+  const session = fakeSession({ accountEmail: 'dummy@example.invalid', authGeneration: randomUUID(), browserManaged: true });
+  await saveSession(path, session);
+  let active = true, resumed = false, starts = 0, logins = 0, reads = 0;
+  const engine = {
+    start: async () => { starts++; },
+    login: async () => { logins++; throw new Error('Unexpected interactive login'); },
+    getSession: () => active ? session : undefined,
+    getSessionBinding: () => ({ userId: session.userId, authGeneration: session.authGeneration }),
+    status: () => ({ authenticated: active, needsLogin: !active }),
+    close: async () => { active = false; },
+    request: async (input: { url: string; method: string }) => {
+      assert.equal(input.method, 'GET');
+      assert.ok(input.url.endsWith('/customer/profile'));
+      reads++;
+      if (!resumed) { active = false; throw new AuthError(401); }
+      active = true;
+      return { status: 200, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ user_id: session.userId, email: session.accountEmail, store_number: '0123' }) };
+    },
+  };
+  const config = { email: session.accountEmail!, sessionPath: path, headed: true, baseUrl: 'https://www.sainsburys.co.uk', loginBaseUrl: 'https://account.sainsburys.co.uk' };
+  const running = runResidentService(config, () => engine);
+  try {
+    for (let i = 0; i < 100 && !(await residentStatus(path)).running; i++) await new Promise(done => setTimeout(done, 20));
+    const failed = await invoke(home, path, ['customer', 'profile'], 2);
+    assert.equal(failed.error.code, 'AuthError');
+    assert.equal((await residentStatus(path)).authenticated, false);
+    resumed = true;
+    const profile = await invoke(home, path, ['customer', 'profile']);
+    assert.equal(profile.user_id, session.userId);
+    assert.equal(reads, 2); assert.equal(starts, 1); assert.equal(logins, 0);
   } finally {
     await stopResidentService(path).catch(() => {}); await running.catch(() => {});
     await rm(home, { recursive: true, force: true });

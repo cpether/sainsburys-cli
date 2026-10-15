@@ -139,6 +139,35 @@ describe("private resident service IPC", () => {
     assert.equal(engine.calls.length, 0);
   }));
 
+  it("lets a bound read recover after an earlier recovery failed without opening login or admitting stale bindings", () => running(async ({path, session, engine}) => {
+    let resumed = false, dispatches = 0, networkWrites = 0;
+    // Model the retained engine after a failed silent refresh. Its identity
+    // remains pinned even though getSession no longer reports authenticated.
+    Object.assign(engine, {getSessionBinding: () => ({userId: session.userId, authGeneration: session.authGeneration})});
+    engine.request = async input => {
+      dispatches++;
+      if (input.method !== "GET") { if (!engine.active) throw new AuthError(401); networkWrites++; }
+      if (!resumed) { engine.active = false; throw new AuthError(401); }
+      engine.active = true;
+      return {status: 200, headers: {"content-type": "application/json"}, body: JSON.stringify({products: []})};
+    };
+    const url = `${RETAILER_ORIGIN}/groceries-api/gol-services/product/v1/product`;
+    const fetch = residentFetch(path, session);
+    assert.equal((await fetch(url)).status, 401);
+    assert.deepEqual(await residentStatus(path), {running: true, authenticated: false, needsLogin: true});
+    assert.equal(engine.getSession(), undefined);
+    for (const stale of [{...session, userId: "999"}, {...session, authGeneration: randomUUID()}]) {
+      assert.equal((await residentFetch(path, stale)(url)).status, 401);
+    }
+    assert.equal(dispatches, 1, "stale bindings never reach the engine");
+    assert.equal((await fetch(`${RETAILER_ORIGIN}/groceries-api/gol-services/basket/v2/basket`, {method: "PUT", body: "{}"})).status, 401);
+    assert.equal(networkWrites, 0, "the unauthenticated engine rejects writes before transport");
+    resumed = true;
+    assert.equal((await fetch(url)).status, 200);
+    assert.equal(dispatches, 3, "a subsequent read can reach retained-context recovery");
+    assert.equal(engine.starts, 1); assert.equal(engine.logins, 0);
+  }));
+
   it("refuses a new email while a live daemon belongs to another account", () => running(async ({config: cfg, engine}) => {
     await assert.rejects(ensureResidentService({...cfg, email: "other@example.invalid"}), /logout/);
     assert.equal(engine.logins, 0);

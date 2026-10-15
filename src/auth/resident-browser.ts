@@ -60,6 +60,9 @@ export class ResidentBrowser {
   }
 
   getSession(): Session | undefined { return this.authenticated ? this.current : undefined; }
+  getSessionBinding(): { userId: string; authGeneration?: string } | undefined {
+    return this.current ? {userId:this.current.userId,authGeneration:this.current.authGeneration} : undefined;
+  }
   status(): { authenticated: boolean; needsLogin: boolean } { return { authenticated: this.authenticated, needsLogin: !this.authenticated }; }
 
   async start(opts: { interactive: boolean; signal?: AbortSignal; timeoutMs?: number }): Promise<void> {
@@ -90,12 +93,18 @@ export class ResidentBrowser {
     const normalized = validateRequest(input);
     // Three bounded phases: request, one silent recovery, one GET retry. Queue time is included.
     return this.budget(signal, 50_000, active => this.enqueue(active, async () => {
-      if (!this.authenticated || !this.pair) throw humanRequired();
       const semanticRead = isRead(normalized);
       let recovered = false;
+      if (!this.authenticated || !this.pair) {
+        // A retained page can resume after a transient sign-in route. Recheck
+        // only on an explicit read; writes cannot use an unverified session.
+        if (!semanticRead || !this.context || !this.current) throw humanRequired();
+        await this.recoverRead(active);
+        recovered = true;
+      }
       if (!this.retailerPage()) {
         // No mutation was sent. A caller must explicitly recover authentication first.
-        if (!semanticRead) throw humanRequired();
+        if (!semanticRead || recovered) throw humanRequired();
         await this.recoverRead(active);
         recovered = true;
       }
