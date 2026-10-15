@@ -6,6 +6,8 @@ export interface CreateClientOptions {
   /** Retained for compatibility. Browser reauthentication is never automatic. */
   autoReauth?: boolean;
   session?: Session;
+  /** Injected transport for isolated tests. */
+  fetchImpl?: typeof fetch;
   log?: (msg: string) => void;
 }
 
@@ -18,5 +20,5 @@ export async function createClient(opts: CreateClientOptions = {}): Promise<Groc
       (config.email && session.accountEmail?.toLowerCase() !== config.email.toLowerCase())) {
     throw new AuthError(401, "Cached session has no matching verified account identity. Run local auth login for SAINSBURYS_EMAIL.");
   }
-  return new GroceriesClient({ session, baseUrl: config.baseUrl });
+  return new GroceriesClient({ session, baseUrl: config.baseUrl, fetchImpl: opts.fetchImpl, sessionPath: opts.session ? undefined : config.sessionPath });
 }

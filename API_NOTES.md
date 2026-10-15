@@ -1,14 +1,16 @@
 # Sainsbury's protocol observations
 
-These notes preserve the useful request knowledge from upstream commit `dde7355e8b52aa64583f3ab0516fbcf35f3c45b6`. Most request shapes are historical observations from the author's 2026 captures. Supervised live login and cached read checks passed on 15 October 2026; the additional unslotted response shape is recorded below. No real HAR or account session is checked in. Tests use synthetic fixtures, clearly labeled as such. See LIVE_VALIDATION.md for completed checks and remaining validation.
+These notes preserve the useful request knowledge from upstream commit `dde7355e8b52aa64583f3ab0516fbcf35f3c45b6`. Most request shapes are historical observations from the author's 2026 captures. Supervised login, reads and reversible basket mutations ran on 15 October 2026, with an authentication failure during removal verification and later confirmed restoration. The additional unslotted response shape is recorded below. No real HAR or account session is checked in. Tests use synthetic fixtures, clearly labeled as such. See LIVE_VALIDATION.md for completed checks and remaining validation.
 
 ## Authentication
 
 The local browser performs Sainsbury's normal account/OAuth flow, including bot checks and manual MFA. Requests to the exact origin `https://www.sainsburys.co.uk` reveal the custom `wcauthtoken` and OAuth bearer token. Retain both tokens and the appropriate cookies for API calls. Earlier upstream claims that there was no bearer token conflicted with the later capture and implementation. This fork preserves the bearer header.
 
-The custom token URL-decodes to `<numeric user ID>,<opaque HMAC>`. Cookies are filtered for the intended host and deduplicated by name, preferring the more specific domain. Account-subdomain cookies are not replayed as www-host cookies. Cookie/token expiry and bot challenges remain live reliability risks. A 401/403 requires explicit local login; no mutation is blindly retried.
+The custom token URL-decodes to `<numeric user ID>,<opaque HMAC>`. A maintained cookie jar selects cookies by the exact request URL, preserving host-only/domain, path, Secure and expiry rules. Same-name cookies on different paths are not collapsed into one value. Account-subdomain cookies are not replayed as www-host cookies. Trusted response cookie replacements and deletions are retained before readback and subsequent CLI requests. Redirects and foreign responses cannot update the jar. Cookie/token expiry and bot challenges remain live reliability risks. A 401/403 requires explicit local login; no mutation is blindly retried.
 
 The browser profile is dedicated to the account email and session path. Login verifies the customer profile's user ID and email before exporting credentials. Supported identity response shapes are flat or nested under `customer`, with `user_id` and `email` or `email_address`. These alternatives fail closed if unverifiable. Live login and fresh-process cached identity reads passed; that does not establish every alternative response shape live.
+
+During the supervised pilot, cached authentication was rejected before the bearer expiry timestamp. Explicit local login recovered access. Subsequent successful read responses set 4–5 cookies, replacing existing cached values. Counts were observed without retaining names, values or raw headers. The original HTTP client ignored these updates; an offline rotating-cookie fixture reproduces a possible stale-session failure. The observed changes do not establish the cause of the live rejections, and no response cookie is assumed to be a replacement `wcauthtoken` or bearer token.
 
 ## Retained request shapes
 
@@ -36,8 +38,10 @@ Product SKUs are numeric `product_uid` or `product.sku`, sometimes JSON numbers 
 
 Preserve the existing line's `uom` and `selected_catchweight` on updates. Initially only `ea` and `kg` are supported for writes, with conservative bounds. New lines must match a known sold-by unit. Unknown units require website review. New catchweight selection requires website review; the integration preserves existing selections. These fields and actual weight/pricing behavior need a supervised check before using weighted goods.
 
+The supervised ordinary-item lookup returned a bulk `retail_price.measure` of `ea`, while its search result used an empty measure and its `unit_price` used kilograms for price comparison. Derive the sold-by unit from the bulk product lookup, not the comparative unit price. The approved ordinary-item sequence reached quantities one, two and zero; repeated target-one application did not duplicate it. Removal needed explicit login before a successful API read confirmed the website's empty basket. Weighted goods and booked-slot pricing are still unverified live.
+
 ## Unresolved live questions
 
-Check identity fields, session reuse/expiry, the bearer/cookie combination, bot challenges, search region, no-reservation store context, basket ID stability during the first addition and quantity-zero removal. Compare delivery prices, Nectar/promotional prices, catchweight totals and slot context with the website. Record sanitized response shapes and concrete failures before changing the transport approach.
+Check sustained session reuse/expiry, response-cookie changes, the bearer/cookie combination and bot challenges. Initial identity, search region, no-reservation store context and a first addition have live evidence. Quantity-zero removal occurred but its immediate CLI readback failed, so clean mutation verification remains open. Compare delivery prices, Nectar/promotional prices, catchweight totals and booked-slot context with the website. Record sanitized response shapes and concrete failures before changing the transport approach.
 
 The old upstream payment listener accepted an order ID as success without establishing payment completion. Its behavior is not evidence of a completed order. This fork contains no payment completion claim or automatic payment path.

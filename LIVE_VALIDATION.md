@@ -1,8 +1,26 @@
 # Supervised live validation
 
-Status on 15 October 2026: user-performed local login and account identity verification passed. Fresh CLI processes then successfully read the cached identity, account-derived context, current reservation, active order state, oats search, candidate product details and basket. The reads reported an empty basket, amend mode off, no active order and no booked slot. No basket mutation, amendment, slot change, checkout or payment has been performed. Website comparison, the approved reversible mutation sequence and natural session expiry remain pending.
+Status on 15 October 2026: the approved reversible basket pilot ran, and the original empty basket is restored and verified through both the website and a fresh API read. Login, identity, account-derived context, search, product lookup, add, repeated-plan idempotence and quantity update worked live. Removal happened, but its immediate CLI readback failed and correctly returned an unknown outcome; a subsequent read required authentication. This is not a clean end-to-end pass. No amendment, slot change, checkout or payment occurred.
 
 The earlier generic login failure was followed by a verification failure. Claude independently reproduced an adapter bug with multiple Set-Cookie headers using real Playwright HTTP and a dummy loopback server. The fixed adapter and refreshed-cookie export were followed by successful live login and cached reads. The unslotted reservation also omitted `is_expired`; the parser now accepts that observed form while requiring an explicit expiry flag whenever a slot is present. Synthetic regression fixtures preserve the field layout without account values. No real session, HAR or raw profile response is checked in.
+
+## Pilot results
+
+The person confirmed the website showed an empty basket and approved one 65p ordinary `ea` porridge pot, with target quantities one, two, then zero. Each fresh plan enforced a £1.30 estimated basket ceiling and a maximum quantity of two, using the account's unchanged store context and no booked slot. A private original snapshot and plan files were created with directory mode 0700 and file mode 0600. Those temporary shopping-data files were removed after verified restoration; the normal cached login was retained.
+
+| Step | CLI result | Website comparison |
+| --- | --- | --- |
+| Set target to one | Verified one item at £0.65 | One item and £0.65 after refreshing a transient website error |
+| Repeat the same plan | Already applied, zero verified changes, quantity stayed one | No duplicate addition |
+| Set target to two | Verified two items at £1.30 | Two items and £1.30 |
+| Set target to zero | Unknown outcome because immediate readback failed | Empty trolley; the mutation was not retried |
+| Verify restoration after explicit local login | Fresh API read matched the original empty basket and £0 total; amendment mode off and no active order | Empty trolley |
+
+Before the first write, the cached session was also rejected: identity returned HTTP 401 about twenty minutes after capture, even though the bearer token expiry was still in the future. Explicit local login recovered access. Another authentication failure prevented removal readback. These observations establish rejection and recovery behavior; they do not establish the cause or a natural expiry interval.
+
+An independent source investigation confirmed that ordinary HTTP responses ignored Set-Cookie updates. A separate read-only diagnostic after recovery observed 4–5 response cookies per endpoint with existing names but changed values. Only status, fixed endpoint/category labels and counts were emitted, with no raw names, values, headers, bodies or hashes. Offline tests reproduced the general stale-cookie failure pattern. This is evidence for fixing a concrete client gap, not proof that it caused either live rejection.
+
+The cookie-refresh fix now retains scoped cookie replacements/deletions and coordinates persistence with concurrent requests, login and logout. All 183 automated tests pass. A bounded read-only live check with the updated client passed identity, context, empty basket and a second identity read in fresh CLI processes; cookie-state changes were persisted without changing the login timestamp or account identity. No further live mutation was performed. A clean mutation/readback sequence after this fix requires fresh approval and remains pending.
 
 ## Login and reads
 
@@ -24,7 +42,7 @@ The earlier generic login failure was followed by a verification failure. Claude
 
 ## One approved reversible sequence
 
-The assistant must first show you the specific SKU, product name, original quantity, units, test target quantities, delivery context, estimated basket totals and limits. You must approve that item and sequence before any live write. Choose a low-cost ordinary `ea` item, ideally absent initially; maximum test quantity two. No approval has been given yet.
+The assistant must first show you the specific SKU, product name, original quantity, units, test target quantities, delivery context, estimated basket totals and limits. You must approve that item and sequence before any live write. Choose a low-cost ordinary `ea` item, ideally absent initially; maximum test quantity two. The pilot above was approved and completed with the stated verification failure. Its approval does not authorize another live mutation sequence.
 
 For an initially absent approved item, generate and review a separate constrained plan for each step:
 
@@ -38,6 +56,8 @@ Use the README `basket plan`/`basket apply --approve` commands for every step. A
 ## Session reuse and decision point
 
 Run a fresh CLI process to read the identity and basket using the cached session. After natural session expiry, confirm that a read returns an authentication/challenge error without starting another browser or mutation. Run explicit local login and verify identity/basket again. A later supervised read on another occasion gives better evidence than immediate reuse alone.
+
+Remaining live checks include a clean mutation/readback sequence after cookie hardening, longer session reuse, natural expiry behavior, booked-slot context and weighted/catchweight products. Keep the original account state unchanged while those checks are pending.
 
 If login cannot establish identity, ordinary browser use works but direct HTTP replay is consistently challenged, or verified basket writes remain unreliable, stop after a bounded pilot. Record sanitized endpoint shapes, response status/content type, the operation and observed website state. Never store token-bearing headers, passwords, MFA codes, cookies, HARs or full account screenshots in the repository. Explain that evidence before replacing authentication or transport. Preserve the useful request shapes and sanitized fixtures.
 
