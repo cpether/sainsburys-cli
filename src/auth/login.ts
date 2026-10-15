@@ -1,5 +1,6 @@
 import { errors, type BrowserContext, type Request } from "playwright";
 import { resolve } from "node:path";
+import { randomUUID } from "node:crypto";
 import type { Config } from "../config.js";
 import { launchContext, type LaunchOptions } from "./browser.js";
 import { type Session, type SessionCookie, parseWcauthtoken, saveSession, withAuthLock } from "./session.js";
@@ -129,7 +130,7 @@ async function captureLogin(opts: LoginOptions, email: string, log: (msg: string
       const session: Session = {
         cookies: await captureCookies(context), wcauthtoken, bearerToken,
         userId: parseWcauthtoken(wcauthtoken).userId,
-        capturedAt: Date.now(),
+        capturedAt: Date.now(), authGeneration: randomUUID(),
         userAgent,
       };
       // Perform an authenticated read using browser transport. This verifies the account

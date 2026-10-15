@@ -24,6 +24,8 @@ export interface Session {
   accountEmail?: string;
   storeNumber?: string;
   capturedAt: number;
+  /** New local logins have a distinct generation; cookie refresh never changes it. */
+  authGeneration?: string;
   userAgent: string;
 }
 
@@ -103,7 +105,8 @@ async function clearDeadCandidates(path: string): Promise<void> {
 }
 
 /** Atomic, nonempty directory locks work across processes and recover dead owners. */
-export async function withAuthLock<T>(path: string, run: () => Promise<T>, timeoutMs = 5_000): Promise<T> {
+export async function withAuthLock<T>(path: string, run: () => Promise<T>, timeoutMs = 5_000, signal?: AbortSignal): Promise<T> {
+  checkAuthCancellation(signal);
   await privateDirectory(dirname(path));
   await clearDeadCandidates(path);
   const deadline = Date.now() + timeoutMs;
@@ -113,7 +116,10 @@ export async function withAuthLock<T>(path: string, run: () => Promise<T>, timeo
   let owned = false;
   let publishing: Promise<void> | undefined;
   let releasing: Promise<void> | undefined;
+  let running: Promise<T> | undefined;
   const release = () => releasing ??= (async () => {
+    // Cancellable HTTP work must finish before lifecycle cleanup releases its lock.
+    if (signal) await running?.catch(() => {});
     await publishing?.catch(() => {});
     if (owned) await removeClaim(path, claim);
     await rm(candidate, { recursive: true, force: true });
@@ -124,6 +130,7 @@ export async function withAuthLock<T>(path: string, run: () => Promise<T>, timeo
     try { await file.writeFile(String(process.pid)); } finally { await file.close(); }
     for (;;) {
       throwIfInterrupted();
+      checkAuthCancellation(signal);
       try {
         publishing = rename(candidate, path).then(() => { owned = true; });
         await publishing;
@@ -134,11 +141,13 @@ export async function withAuthLock<T>(path: string, run: () => Promise<T>, timeo
         if (!["EEXIST", "ENOTEMPTY", "ENOTDIR", "EISDIR"].includes((err as NodeJS.ErrnoException).code ?? "")) throw err;
         await reclaimDeadLock(path);
         if (Date.now() >= deadline) throw new Error(`Local state lock is busy or has an unrecognized owner: ${path}`);
-        await new Promise((done) => setTimeout(done, Math.min(25, Math.max(1, deadline - Date.now()))));
+        await authLockDelay(Math.min(25, Math.max(1, deadline - Date.now())), signal);
       }
     }
     throwIfInterrupted();
-    return await run();
+    checkAuthCancellation(signal);
+    running = Promise.resolve().then(() => { checkAuthCancellation(signal); return run(); });
+    return await running;
   } finally {
     try { await release(); }
     finally { unregister(); }
@@ -191,7 +200,8 @@ function validSession(value: unknown): value is Session {
     typeof s.bearerToken === "string" && !!s.bearerToken && !/[\r\n]/.test(s.bearerToken) &&
     typeof s.userId === "string" && /^\d+$/.test(s.userId) &&
     Number.isFinite(s.capturedAt) && typeof s.userAgent === "string" &&
-    (s.accountEmail === undefined || typeof s.accountEmail === "string");
+    (s.accountEmail === undefined || typeof s.accountEmail === "string") &&
+    (s.authGeneration === undefined || (typeof s.authGeneration === "string" && /^[a-f0-9-]{36}$/.test(s.authGeneration)));
 }
 
 export async function loadSession(path: string): Promise<Session | null> {
@@ -212,7 +222,8 @@ export async function loadSession(path: string): Promise<Session | null> {
   }
 }
 
-export async function saveSession(path: string, session: Session): Promise<void> {
+export async function saveSession(path: string, session: Session, signal?: AbortSignal): Promise<void> {
+  checkAuthCancellation(signal);
   if (!validSession(session)) throw new Error("Refusing to save an invalid session.");
   await withAuthLock(`${path}.lock`, async () => {
     // Refuse symlink destinations. Rename itself never follows the destination.
@@ -234,12 +245,13 @@ export async function saveSession(path: string, session: Session): Promise<void>
       await file.sync();
       await file.close();
       throwIfInterrupted();
+      checkAuthCancellation(signal);
       await rename(temporary, path);
     } finally {
       try { await cleanup(); }
       finally { unregister(); }
     }
-  });
+  }, 5_000, signal);
 }
 
 /** Remove session JSON and every browser profile associated with this session path. */
@@ -304,4 +316,28 @@ export function parseWcauthtoken(token: string): { userId: string; hmac: string 
   const hmac = decoded.slice(idx + 1);
   if (idx < 1 || !/^\d+$/.test(userId) || !hmac) throw new Error("Invalid authentication token format.");
   return { userId, hmac };
+}
+
+/** Fixed cancellation text prevents AbortSignal.reason from exposing secrets. */
+function checkAuthCancellation(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    const error = new Error("Local authentication operation was cancelled.");
+    error.name = "AbortError";
+    throw error;
+  }
+}
+
+async function authLockDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  checkAuthCancellation(signal);
+  await new Promise<void>((resolve, reject) => {
+    const finish = () => { signal?.removeEventListener("abort", cancel); resolve(); };
+    const timer = setTimeout(finish, ms);
+    const cancel = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", cancel);
+      try { checkAuthCancellation(signal); } catch (error) { reject(error); }
+    };
+    signal?.addEventListener("abort", cancel, { once: true });
+    if (signal?.aborted) cancel();
+  });
 }

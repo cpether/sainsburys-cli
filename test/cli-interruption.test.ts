@@ -13,8 +13,10 @@ const cliPath = resolve("src/cli/index.ts");
 const cliModule = pathToFileURL(cliPath).href;
 const preloadPath = resolve("test/cli-preload.mjs");
 const preloadModule = pathToFileURL(preloadPath).href;
+const httpModule = pathToFileURL(resolve("src/client/http.ts")).href;
+const lifecycleModule = pathToFileURL(resolve("src/auth/lifecycle.ts")).href;
 
-async function interruptedCli(signal: "SIGINT" | "SIGTERM", mode: "write" | "readback" | "read") {
+async function interruptedCli(signal: "SIGINT" | "SIGTERM", mode: "write" | "readback" | "read" | "queued") {
   const home = await mkdtemp(join(tmpdir(), "sainsburys-cli-interruption-"));
   const session = join(home,"session.json"), state = join(home,"basket.json"), log = join(home,"requests.jsonl");
   const targets = join(home,"targets.json"), plan = join(home,"plan.json"), aborted = join(home,"aborted");
@@ -38,10 +40,27 @@ async function interruptedCli(signal: "SIGINT" | "SIGTERM", mode: "write" | "rea
       let wrote=false;
       const waitForSignal=init=>{
         process.send({ready:true});
-        return new Promise((_,reject)=>init.signal.addEventListener('abort',()=>{
-          writeFileSync(process.env.TEST_ABORT_MARKER,'aborted');reject(new Error('dummy cancellation'));
-        },{once:true}));
+        return new Promise((_,reject)=>{
+          // The injected pre-transport queue also models the HTTP deadline's
+          // live timer, so this child cannot exit before its parent signals it.
+          const deadline=${JSON.stringify(mode)}==='queued'?setTimeout(()=>reject(new Error('dummy queue deadline')),30000):undefined;
+          init.signal.addEventListener('abort',()=>{
+            if(deadline)clearTimeout(deadline);
+            writeFileSync(process.env.TEST_ABORT_MARKER,'aborted');reject(new Error('dummy cancellation'));
+          },{once:true});
+        });
       };
+      if(${JSON.stringify(mode)}==='queued'){
+        const {GroceriesClient}=await import(${JSON.stringify(httpModule)});
+        const {interruptionSignal}=await import(${JSON.stringify(lifecycleModule)});
+        const request=GroceriesClient.prototype.request;
+        // Hold the actual plan's HTTP call before transport starts. The HTTP
+        // queue tests cover the lock itself; this covers the outer CLI scope.
+        GroceriesClient.prototype.request=function(path,opts){
+          if(opts?.method==='PUT')return waitForSignal({signal:interruptionSignal()});
+          return request.call(this,path,opts);
+        };
+      }
       globalThis.fetch=async(input,init)=>{
         const url=new URL(String(input));
         const isBasket=url.pathname.endsWith('/basket') || url.pathname.endsWith('/basket/item');
@@ -74,7 +93,7 @@ async function interruptedCli(signal: "SIGINT" | "SIGTERM", mode: "write" | "rea
       const result = JSON.parse(stdout.trim()); // Also rejects multiple JSON results.
       assert.equal(result.ok,false);
       assert.equal(result.error.code,"InterruptedError");
-      assert.equal(result.outcome,mode==="read"?"cancelled":"unknown");
+      assert.equal(result.outcome,mode==="read"||mode==="queued"?"cancelled":"unknown");
       assert.doesNotMatch(stdout+stderr,/test-jwt|wcauthtoken|abc%2B|dummy cancellation/);
       assert.equal(await readFile(aborted,"utf8"),"aborted");
       const calls=(await readFile(log,"utf8")).trim().split("\n").filter(Boolean).map(line=>JSON.parse(line));
@@ -89,5 +108,6 @@ describe("structured CLI interruptions",()=>{
     it(`${signal} emits one unknown result during a basket PUT`,()=>interruptedCli(signal,"write"));
     it(`${signal} emits one unknown result between a completed write and its readback`,()=>interruptedCli(signal,"readback"));
     it(`${signal} emits one cancelled result during a read-only command`,()=>interruptedCli(signal,"read"));
+    it(`${signal} emits one cancelled result while a mutation is queued before transport`,()=>interruptedCli(signal,"queued"));
   }
 });

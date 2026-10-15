@@ -379,6 +379,15 @@ describe("manual local login", () => {
     } finally { launch.mock.restore(); }
   }));
 
+  it("assigns a distinct login generation even when the browser reuses the same credentials", () => temporary(async dir => {
+    const fake = fakeBrowser();
+    const first = await performLogin(options(dir, { launch: fake.launch }));
+    const second = await performLogin(options(dir, { launch: fake.launch }));
+    assert.match(first.authGeneration!, /^[a-f0-9-]{36}$/);
+    assert.notEqual(first.authGeneration, second.authGeneration);
+    assert.equal((await loadSession(options(dir).config.sessionPath))?.authGeneration, second.authGeneration);
+  }));
+
   it("cached-session clients need no password and never launch login", async () => {
     const previous = process.env.SAINSBURYS_EMAIL;
     delete process.env.SAINSBURYS_EMAIL;

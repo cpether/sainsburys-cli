@@ -243,13 +243,16 @@ async function applyLocked(c: PlanContext, value: unknown, approval: string): Pr
       if (quantityState(stateForPlan(before, plan)) !== quantityState(expectedLines(plan, applied))) throw new Error("Basket changed during application");
       if (before.basket_id !== plan.basketId) throw new Error("Basket identity changed during application");
       const line = findPlannedLine(before, plan, ch.key);
+      let writeError: unknown;
+      try {
+        if (line) await updateItems(c.client, c.basketContext, [{ productUid: ch.sku, itemUid: line.item_uid!, quantity: ch.to, uom: ch.uom, selectedCatchweight: ch.selectedCatchweight, decreasingQuantity: ch.to < line.quantity }]);
+        else if (ch.to) await addItem(c.client, c.basketContext, { productUid: ch.sku, quantity: ch.to, uom: ch.uom, selectedCatchweight: ch.selectedCatchweight });
+      } catch (err) { writeError = err; }
+      // HTTP tracks actual transport. Activate the outer scope only after its
+      // promise settles, so interruption while queued before send is cancelled.
+      // This continuation runs before another signal event can interrupt readback.
       const finishWrite = beginUnverifiedWrite();
       try {
-        let writeError: unknown;
-        try {
-          if (line) await updateItems(c.client, c.basketContext, [{ productUid: ch.sku, itemUid: line.item_uid!, quantity: ch.to, uom: ch.uom, selectedCatchweight: ch.selectedCatchweight, decreasingQuantity: ch.to < line.quantity }]);
-          else if (ch.to) await addItem(c.client, c.basketContext, { productUid: ch.sku, quantity: ch.to, uom: ch.uom, selectedCatchweight: ch.selectedCatchweight });
-        } catch (err) { writeError = err; }
         let after: Basket;
         let afterState: StateLine[];
         try { after = await getBasket(c.client, c.basketContext); afterState = stateForPlan(after, plan); }

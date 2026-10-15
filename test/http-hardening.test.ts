@@ -190,10 +190,12 @@ describe("authentication and mutation outcomes", () => {
     }, async () => { authCalls++; return fakeSession({ wcauthtoken: "fresh" }); });
     const late = c.request("/late");
     await lateStarted;
-    await c.request("/fast");
+    // A newer explicit session can replace an in-flight in-memory read.
+    // Serialized requests cannot overtake that read on the same client.
+    c.setSession(fakeSession({ wcauthtoken: "fresh" }));
     releaseLate();
     await late;
-    assert.equal(authCalls, 1);
+    assert.equal(authCalls, 0);
   });
 
   it("permits read semantics only for the known slot-inspection POST", async () => {
@@ -229,7 +231,10 @@ describe("authentication and mutation outcomes", () => {
 
   it("reports cancellation after a mutation starts as an unknown outcome", async () => {
     const controller = new AbortController();
-    const request = client(async () => new Promise<Response>(() => {})).request("/x", { method: "PUT", signal: controller.signal });
+    let began!: () => void;
+    const started = new Promise<void>(resolve => { began = resolve; });
+    const request = client(async () => { began(); return new Promise<Response>(() => {}); }).request("/x", { method: "PUT", signal: controller.signal });
+    await started;
     controller.abort();
     await assert.rejects(request, UnknownOutcomeError);
   });
