@@ -36,7 +36,7 @@ export class ResponseValidationError extends ApiError {
 
 export class RequestTimeoutError extends Error {
   constructor() {
-    super("The retailer request exceeded its deadline.");
+    super("The request exceeded its deadline, including any wait for local session access.");
     this.name = "RequestTimeoutError";
   }
 }
