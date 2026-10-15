@@ -1,6 +1,6 @@
 # Supervised live validation
 
-Status: pending. No real account login, retailer API call, basket write, amendment, slot booking or payment has been performed during implementation. Mocked tests establish local behavior only.
+Status: pending successful CLI login and verified reads. The first user-supervised attempt reached the account/trolley page, then closed with a generic terminal failure. A retry with stage diagnostics captured authenticated credentials, then failed before a usable verification response reached the validator. Claude independently reproduced a response-adapter failure with multiple Set-Cookie headers using real Playwright HTTP and a dummy loopback server. That defect and the export of cookies refreshed by verification are fixed with regression coverage. It is a strong candidate for the live cause, awaiting retry. The assistant has made no live retailer requests or basket changes. Offline tests establish local behavior only.
 
 ## Login and reads
 
@@ -16,6 +16,7 @@ Status: pending. No real account login, retailer API call, basket write, amendme
    ```
 
    Enter the password and MFA only in the opened Chromium window. Never paste either into the assistant conversation, a command argument or a plan file.
+   If sign-in finishes but the terminal is waiting, open Trolley in the same window. Expect `Authenticated API credentials captured; verifying account identity.` followed by verified login success. If it fails, record only the sanitized terminal error, whether that progress message appeared, and whether the window reached the account/trolley page. Keep the existing dedicated profile for retry; do not delete authentication state as a troubleshooting step.
 2. Run `--json customer profile`, `--json customer context`, `--json slot current`, `--json product search oats` and `--json basket show`. Confirm the intended account, selected store/reservation, product prices and basket quantities against the normal website. If the store is unknown, compare the website before providing `--store`.
 3. Keep a private original basket snapshot and record the chosen item's original quantity, unit and catchweight. Check `order status` and confirm amend mode is false. Stop if either amendment flag is true or context differs from the website.
 

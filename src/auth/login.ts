@@ -1,9 +1,9 @@
-import { type BrowserContext, type Request } from "playwright";
+import { errors, type BrowserContext, type Request } from "playwright";
 import { resolve } from "node:path";
 import type { Config } from "../config.js";
 import { launchContext, type LaunchOptions } from "./browser.js";
 import { type Session, type SessionCookie, parseWcauthtoken, saveSession, withAuthLock } from "./session.js";
-import { GroceriesClient } from "../client/http.js";
+import { ApiError, AuthError, GroceriesClient, RequestTimeoutError, ResponseValidationError } from "../client/http.js";
 import { MFA_INSTRUCTIONS } from "./mfa-providers.js";
 import { registerCleanup, throwIfInterrupted } from "./lifecycle.js";
 
@@ -20,7 +20,9 @@ export interface LoginOptions {
 
 const activeLogins = new Map<string, Promise<Session>>();
 const ORIGIN = "https://www.sainsburys.co.uk";
-class LocalLoginError extends Error {}
+class LocalLoginError extends Error {
+  constructor(message: string) { super(message); this.name = "LocalLoginError"; }
+}
 
 /** A single manual login per session path, including callers in the same process. */
 export function performLogin(opts: LoginOptions): Promise<Session> {
@@ -68,13 +70,20 @@ async function captureLogin(opts: LoginOptions, email: string, log: (msg: string
   const close = () => closing ??= context.close();
   const unregister = registerCleanup(close);
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let stage = "opening the browser page";
+  let verificationFailure: string | undefined;
   try {
     throwIfInterrupted();
     const page = await context.newPage();
+    // Read browser metadata on about:blank, before login redirects can destroy
+    // the execution context. Credential capture need not wait for document load.
+    const userAgent = await page.evaluate(() => navigator.userAgent);
     let wcauthtoken: string | undefined;
     let bearerToken: string | undefined;
     let resolveTokens!: () => void;
-    const tokens = new Promise<void>((resolve) => { resolveTokens = resolve; });
+    let rejectTokens!: (error: Error) => void;
+    const tokens = new Promise<void>((resolve, reject) => { resolveTokens = resolve; rejectTokens = reject; });
+    const onClosed = () => rejectTokens(new LocalLoginError("Login browser closed before authenticated credentials were captured. Retry auth login."));
     const onRequest = (req: Request) => {
       let url: URL;
       try { url = new URL(req.url()); } catch { return; }
@@ -89,6 +98,7 @@ async function captureLogin(opts: LoginOptions, email: string, log: (msg: string
       if (wcauthtoken && bearerToken) resolveTokens();
     };
     page.on("request", onRequest);
+    page.on("close", onClosed);
     const deadline = new Promise<never>((_, reject) => {
       timer = setTimeout(() => reject(new LocalLoginError("Local login timed out. Complete login and MFA in the browser, then retry auth login.")), opts.timeoutMs ?? 300_000);
     });
@@ -96,62 +106,99 @@ async function captureLogin(opts: LoginOptions, email: string, log: (msg: string
     try {
       await Promise.race([
         (async () => {
-          await page.goto(`${ORIGIN}/gol-ui/my-account/orders`, { waitUntil: "domcontentloaded", timeout: 30_000 });
+          stage = "opening the account page";
+          const navigation = page.goto(`${ORIGIN}/gol-ui/my-account/orders`, { waitUntil: "domcontentloaded", timeout: 30_000 }).catch((error: unknown) => {
+            // Login/MFA and SPA redirects need not complete within a document-load
+            // deadline. The credential event and identity read determine success.
+            if (!(error instanceof errors.TimeoutError)) throw error;
+          });
+          await Promise.race([navigation, tokens]);
+          stage = "waiting for authenticated API credentials";
           if (!wcauthtoken || !bearerToken) {
-            // Reused profiles can serve a cached account page with no API bootstrap.
-            // Wait for the user's login redirect, then visit the trolley to capture a
-            // fresh authenticated request. Never navigate away while MFA is being entered.
-            await page.waitForURL((url) => url.origin === ORIGIN && url.pathname.startsWith("/gol-ui/"), {
-              timeout: opts.timeoutMs ?? 300_000,
-            });
-            await page.goto(`${ORIGIN}/gol-ui/trolley`, { waitUntil: "domcontentloaded", timeout: 30_000 });
+            // A /gol-ui/ URL can appear before the SPA starts its login redirect.
+            // Never force another navigation while the user may be entering MFA.
+            log("After completing login and MFA, open Trolley in this browser window if the terminal is still waiting.");
           }
           await tokens;
         })(),
         deadline,
       ]);
       if (!wcauthtoken || !bearerToken) throw new LocalLoginError("Login did not capture authenticated API credentials.");
-      const cookies = (await context.cookies()).filter((c) => {
-        const domain = c.domain.replace(/^\./, "");
-        return domain === "sainsburys.co.uk" || domain.endsWith(".sainsburys.co.uk");
-      });
-      const sessionCookies: SessionCookie[] = cookies.map((c) => ({
-        name: c.name, value: c.value, domain: c.domain, path: c.path,
-        expires: c.expires === -1 ? undefined : c.expires,
-        httpOnly: c.httpOnly, secure: c.secure, sameSite: c.sameSite,
-      }));
+      log("Authenticated API credentials captured; verifying account identity.");
+      stage = "reading browser session state";
       const session: Session = {
-        cookies: sessionCookies, wcauthtoken, bearerToken,
+        cookies: await captureCookies(context), wcauthtoken, bearerToken,
         userId: parseWcauthtoken(wcauthtoken).userId,
         capturedAt: Date.now(),
-        userAgent: await page.evaluate(() => navigator.userAgent),
+        userAgent,
       };
       // Perform an authenticated read using browser transport. This verifies the account
       // before exporting credentials or accepting an already-authenticated profile.
       const client = new GroceriesClient({
         session, baseUrl: ORIGIN,
         fetchImpl: async (input, init) => {
-          const result = await context.request.get(String(input), {
-            headers: Object.fromEntries(new Headers(init?.headers).entries()),
-            maxRedirects: 0, timeout: 15_000,
-          });
-          return new Response(await result.body(), { status: result.status(), headers: result.headers() });
+          let result;
+          try {
+            result = await context.request.get(String(input), {
+              headers: Object.fromEntries(new Headers(init?.headers).entries()),
+              maxRedirects: 0, timeout: 15_000,
+            });
+          } catch (error) {
+            // The shared client intentionally masks raw fetch errors. Preserve
+            // only a fixed category before it does so, never the browser call log.
+            verificationFailure = browserTransportFailure(error);
+            throw new Error("Browser verification transport failed.");
+          }
+          let body;
+          try { body = await result.body(); }
+          catch {
+            verificationFailure = "browser verification response could not be read";
+            throw new Error("Browser verification response failed.");
+          }
+          try {
+            const status = result.status();
+            // Playwright joins repeated Set-Cookie values with newlines, which
+            // Fetch Headers rejects. Its cookie jar already processes them. The
+            // HTTP validator only needs these response metadata fields.
+            const source = result.headers();
+            const headers: Record<string, string> = {};
+            for (const name of ["content-type", "content-length"]) if (source[name] !== undefined) headers[name] = source[name];
+            return new Response([204, 205, 304].includes(status) ? null : body, { status, headers });
+          } catch {
+            verificationFailure = "browser verification response could not be adapted";
+            throw new Error("Browser verification response failed.");
+          }
         },
       });
+      stage = "account verification";
       const result: unknown = await client.request("/groceries-api/gol-services/customer/v1/customer/profile");
       const profile = identityProfile(result);
       if (String(profile.user_id) !== session.userId || profile.email.trim().toLowerCase() !== email) {
         throw new LocalLoginError("Authenticated browser account does not match SAINSBURYS_EMAIL. Log out in the local browser and retry with the intended account.");
       }
+      // The verification response may rotate authentication cookies in the shared
+      // browser/API cookie jar. Export that final state, not the pre-read snapshot.
+      stage = "reading verified browser session state";
+      session.cookies = await captureCookies(context);
       session.accountEmail = email;
       log("Account identity verified; local login complete.");
       return session;
     } finally {
       page.off("request", onRequest);
+      page.off("close", onClosed);
     }
   } catch (err) {
     if (err instanceof LocalLoginError) throw err;
-    throw new LocalLoginError("Local browser login failed. Check the browser window and retry auth login; credentials were not persisted.");
+    // Classify only errors with known, sanitized semantics. Never include raw
+    // Playwright messages, URLs, response bodies or authentication headers.
+    let detail = `failed during ${stage}`;
+    if (stage === "account verification") {
+      if (err instanceof AuthError) detail = `failed during account verification: retailer rejected the read (HTTP ${err.status})`;
+      else if (err instanceof ResponseValidationError) detail = `failed during account verification: ${err.message}`;
+      else if (err instanceof ApiError) detail = `failed during account verification: ${err.status ? `HTTP ${err.status}` : verificationFailure ?? "network or browser transport failure"}`;
+      else if (err instanceof RequestTimeoutError) detail = "failed during account verification: the read exceeded its 15-second deadline";
+    }
+    throw new LocalLoginError(`Local browser login ${detail}. Session credentials were not saved. Retry auth login; share only this sanitized error if it fails again.`);
   } finally {
     if (timer) clearTimeout(timer);
     // Browser errors can include URLs and page contents. Do not expose those details.
@@ -161,6 +208,35 @@ async function captureLogin(opts: LoginOptions, email: string, log: (msg: string
       });
     } finally { unregister(); }
   }
+}
+
+async function captureCookies(context: BrowserContext): Promise<SessionCookie[]> {
+  return (await context.cookies()).filter(cookie => {
+    const domain = cookie.domain.replace(/^\./, "");
+    return domain === "sainsburys.co.uk" || domain.endsWith(".sainsburys.co.uk");
+  }).map(cookie => ({
+    name: cookie.name, value: cookie.value, domain: cookie.domain, path: cookie.path,
+    expires: cookie.expires === -1 ? undefined : cookie.expires,
+    httpOnly: cookie.httpOnly, secure: cookie.secure, sameSite: cookie.sameSite,
+  }));
+}
+
+/** Inspect only the failure summary, excluding Playwright's token-bearing call log. */
+function browserTransportFailure(error: unknown): string {
+  if (error instanceof errors.TimeoutError) return "browser verification request timed out";
+  const summary = error instanceof Error ? error.message.split(/\r?\n/, 1)[0] ?? "" : "";
+  const categories: Array<[RegExp, string]> = [
+    [/ECONNRESET|socket hang up|connection reset|ERR_CONNECTION_RESET/i, "connection reset before a response"],
+    [/certificate|CERT_HAS_EXPIRED|UNABLE_TO_VERIFY_LEAF_SIGNATURE|ERR_TLS_CERT_ALTNAME_INVALID/i, "TLS certificate verification failed; check local network trust and Node certificate configuration"],
+    [/ENOTFOUND|EAI_AGAIN/i, "DNS lookup failed"],
+    [/ECONNREFUSED/i, "connection refused"],
+    [/ETIMEDOUT|timed out|Timeout \d+ms exceeded/i, "browser verification request timed out"],
+    [/ENETUNREACH|EHOSTUNREACH/i, "network unreachable"],
+    [/ERR_INVALID_CHAR|Invalid character in header/i, "browser verification request headers were rejected locally"],
+    [/ERR_HTTP2_PROTOCOL_ERROR|HPE_[A-Z_]+/i, "HTTP protocol failure"],
+    [/Target .* has been closed/i, "login browser closed during account verification"],
+  ];
+  return categories.find(([pattern]) => pattern.test(summary))?.[1] ?? "browser verification request failed (unclassified transport error)";
 }
 
 function identityProfile(value: unknown): { user_id: string | number; email: string } {

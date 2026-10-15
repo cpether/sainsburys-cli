@@ -4,7 +4,8 @@ import { EventEmitter } from "node:events";
 import { mkdtemp, rm, stat, readFile, readdir, chmod, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { chromium, type BrowserContext } from "playwright";
+import { createServer } from "node:http";
+import { chromium, errors, request, type BrowserContext } from "playwright";
 import { performLogin, type LoginOptions } from "../src/auth/login.js";
 import { browserDataDir, launchContext } from "../src/auth/browser.js";
 import { clearSession, saveSession, loadSession, profileRoot, withAuthLock } from "../src/auth/session.js";
@@ -112,6 +113,122 @@ describe("private authentication storage", () => {
 });
 
 describe("manual local login", () => {
+  it("verifies a real Playwright response with multiple Set-Cookie headers and retains refreshed cookies", () => temporary(async (dir) => {
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "application/json", "set-cookie": ["first=dummy-first; Path=/", "second=dummy-second; Path=/"] });
+      res.end(JSON.stringify({ user_id: "123456789", email: "dummy@example.com" }));
+    });
+    await new Promise<void>(done => server.listen(0, "127.0.0.1", done));
+    const transport = await request.newContext();
+    try {
+      const address = server.address();
+      assert.ok(address && typeof address !== "string");
+      const fake = fakeBrowser();
+      fake.context.request.get = async (_input, init) => transport.get(`http://127.0.0.1:${address.port}/profile`, init);
+      // BrowserContext.request shares its context's cookie jar. Model that here
+      // with real Playwright storage state, mapping loopback dummy cookies to the
+      // retailer domain solely for the session cookie allowlist under test.
+      fake.context.cookies = async () => (await transport.storageState()).cookies.map(cookie => ({ ...cookie, domain: ".sainsburys.co.uk" }));
+      const opts = options(dir, { launch: fake.launch });
+      const session = await performLogin(opts);
+      assert.equal(session.accountEmail, "dummy@example.com");
+      assert.deepEqual(session.cookies.map(cookie => [cookie.name, cookie.value]).sort(), [["first", "dummy-first"], ["second", "dummy-second"]]);
+      assert.deepEqual((await loadSession(opts.config.sessionPath))?.cookies.map(cookie => [cookie.name, cookie.value]).sort(), [["first", "dummy-first"], ["second", "dummy-second"]]);
+    } finally {
+      await transport.dispose();
+      await new Promise<void>((done, reject) => server.close(error => error ? reject(error) : done()));
+    }
+  }));
+
+  it("reads browser metadata before the login redirect can replace its execution context", () => temporary(async (dir) => {
+    const fake = fakeBrowser();
+    const goto = fake.page.goto;
+    let navigating = false;
+    fake.page.goto = async () => { navigating = true; await goto(); };
+    fake.page.evaluate = async () => {
+      assert.equal(navigating, false, "post-login redirects can destroy the evaluation context");
+      return "DummyBrowser/1";
+    };
+    const session = await performLogin(options(dir, { launch: fake.launch }));
+    assert.equal(session.userAgent, "DummyBrowser/1");
+  }));
+
+  it("verifies a completed login even when the initial document load times out", () => temporary(async (dir) => {
+    const fake = fakeBrowser();
+    const goto = fake.page.goto;
+    fake.page.goto = async () => {
+      await goto(); // The browser has already sent an authenticated API request.
+      throw new errors.TimeoutError("dummy private navigation URL");
+    };
+    const session = await performLogin(options(dir, { launch: fake.launch, timeoutMs: 1000 }));
+    assert.equal(session.accountEmail, "dummy@example.com");
+    assert.equal(fake.closes, 1);
+  }));
+
+  it("does not wait for the document load after authenticated API activity", () => temporary(async (dir) => {
+    const fake = fakeBrowser();
+    const goto = fake.page.goto;
+    fake.page.goto = async () => { await goto(); await new Promise(() => {}); };
+    const session = await performLogin(options(dir, { launch: fake.launch, timeoutMs: 100 }));
+    assert.equal(session.accountEmail, "dummy@example.com");
+  }));
+
+  for (const failure of [
+    { status: 403, body: "private challenge with dummy-cookie", contentType: "text/html", expected: /HTTP 403/ },
+    { status: 200, body: "<html>dummy-cookie</html>", contentType: "text/html", expected: /HTML/ },
+    { status: 200, body: "{dummy-cookie", contentType: "application/json", expected: /malformed JSON/ },
+    { status: 302, body: "", contentType: "text/html", expected: /redirects are refused/ },
+    { status: 500, body: "dummy-cookie", contentType: "text/html", expected: /HTTP 500/ },
+  ]) it(`identifies an identity read failure (${failure.status}, ${failure.expected.source}) without disclosing its response`, () => temporary(async (dir) => {
+    const fake = fakeBrowser();
+    fake.context.request.get = async () => ({
+      body: async () => Buffer.from(failure.body),
+      status: () => failure.status,
+      headers: () => ({ "content-type": failure.contentType }),
+    }) as never;
+    const opts = options(dir, { launch: fake.launch });
+    await assert.rejects(performLogin(opts), (err: Error) => {
+      assert.match(err.message, /account verification/);
+      assert.match(err.message, failure.expected);
+      assert.doesNotMatch(err.message, /dummy-cookie|private challenge/);
+      return true;
+    });
+    assert.equal(await loadSession(opts.config.sessionPath), null);
+  }));
+
+  for (const failure of [
+    { message: "apiRequestContext.get: socket hang up", expected: /connection reset/ },
+    { message: "apiRequestContext.get: unable to get local issuer certificate", expected: /TLS certificate verification failed/ },
+    { message: "apiRequestContext.get: getaddrinfo ENOTFOUND private-host", expected: /DNS lookup failed/ },
+    { message: "apiRequestContext.get: connect ECONNREFUSED private-host", expected: /connection refused/ },
+    { message: "apiRequestContext.get: Invalid character in header content [cookie]", expected: /headers were rejected locally/ },
+    { message: "apiRequestContext.get: unrecognized private failure", expected: /unclassified transport error/ },
+  ]) it(`classifies browser transport failure as ${failure.expected.source} without exposing its call log`, () => temporary(async (dir) => {
+    const fake = fakeBrowser();
+    fake.context.request.get = async () => { throw new Error(`${failure.message}\nCall log:\nCookie: dummy-cookie\nAuthorization: Bearer secret-token`); };
+    const opts = options(dir, { launch: fake.launch });
+    await assert.rejects(performLogin(opts), (error: Error) => {
+      assert.match(error.message, /account verification/);
+      assert.match(error.message, failure.expected);
+      assert.doesNotMatch(error.message, /dummy-cookie|secret-token|private-host|Call log|unrecognized private failure/);
+      return true;
+    });
+    assert.equal(await loadSession(opts.config.sessionPath), null);
+    assert.equal(fake.closes, 1);
+  }));
+
+  it("waits for manual login after a document timeout and cleans a closed browser promptly", () => temporary(async (dir) => {
+    const fake = fakeBrowser("dummy@example.com", false);
+    fake.page.goto = async () => { throw new errors.TimeoutError("dummy private URL"); };
+    const opts = options(dir, { launch: fake.launch, timeoutMs: 1000, log: message => {
+      if (message.startsWith("After completing login")) fake.page.emit("close");
+    } });
+    await assert.rejects(performLogin(opts), /Login browser closed/);
+    assert.equal(fake.closes, 1);
+    assert.equal(fake.page.listenerCount("close"), 0);
+    assert.equal(await loadSession(opts.config.sessionPath), null);
+  }));
+
   it("verifies identity without touching a password, persists only after verification and clears timers", () => temporary(async (dir) => {
     const fake = fakeBrowser();
     const outstanding = new Set<ReturnType<typeof setTimeout>>();
@@ -134,24 +251,29 @@ describe("manual local login", () => {
     assert.equal((await loadSession(opts.config.sessionPath))?.accountEmail, "dummy@example.com");
     assert.equal(fake.closes, 1);
     assert.equal(fake.page.listenerCount("request"), 0);
+    assert.equal(fake.page.listenerCount("close"), 0);
     assert.equal(outstanding.size, 0, "successful login must cancel its deadline");
     schedule.mock.restore();
     cancel.mock.restore();
     assert.ok(logs.every((line) => !line.includes(session.bearerToken) && !line.includes(session.wcauthtoken)));
   }));
 
-  it("refreshes a cached account page after local login without a navigation timer", () => temporary(async (dir) => {
+  it("leaves login/MFA navigation to the person and captures their later trolley request", () => temporary(async (dir) => {
     const fake = fakeBrowser("dummy@example.com", false);
     const visits: string[] = [];
     fake.page.goto = async (url?: string) => {
       visits.push(url ?? "");
-      if (url?.endsWith("/trolley")) fake.page.emit("request", {
+    };
+    const logs: string[] = [];
+    await performLogin(options(dir, { launch: fake.launch, timeoutMs: 1000, log: message => {
+      logs.push(message);
+      if (message.startsWith("After completing login")) fake.page.emit("request", {
         url: () => "https://www.sainsburys.co.uk/groceries-api/gol-services/basket/v2/basket",
         headers: () => ({ wcauthtoken: fakeSession().wcauthtoken, authorization: `Bearer ${fakeSession().bearerToken}` }),
       });
-    };
-    await performLogin(options(dir, { launch: fake.launch }));
-    assert.deepEqual(visits, ["https://www.sainsburys.co.uk/gol-ui/my-account/orders", "https://www.sainsburys.co.uk/gol-ui/trolley"]);
+    } }));
+    assert.deepEqual(visits, ["https://www.sainsburys.co.uk/gol-ui/my-account/orders"]);
+    assert.ok(logs.some(message => message.includes("open Trolley")));
   }));
 
   it("rejects wrong accounts and missing identity without persisting credentials", () => temporary(async (dir) => {
