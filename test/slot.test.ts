@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { GroceriesClient } from "../src/client/http.js";
-import { bookSlot, listSlots } from "../src/api/slot.js";
+import { listSlots } from "../src/api/slot.js";
 import { fakeSession, makeFakeFetch } from "./_helpers.js";
 
 const baseUrl = "https://www.sainsburys.co.uk";
@@ -14,7 +14,7 @@ function clientWith(responses: Parameters<typeof makeFakeFetch>[0]) {
 
 describe("slot api", () => {
   it("listSlots POSTs the canonical body shape", async () => {
-    const { c, calls } = clientWith([{ status: 200, body: { days: [] } }]);
+    const { c, calls } = clientWith([{ status: 200, body: { slots: [] } }]);
     await listSlots(c, {
       weekNumber: 1,
       storeIdentifier: "2168",
@@ -38,24 +38,4 @@ describe("slot api", () => {
     });
   });
 
-  it("bookSlot POSTs booking_key + new_slot_date + new_store_number", async () => {
-    const { c, calls } = clientWith([{ status: 200, body: null }]);
-    await bookSlot(c, {
-      bookingKey: "abc==",
-      newSlotDate: "2026-05-26T13:00:00Z",
-      newStoreNumber: "2168",
-    });
-    assert.equal(calls[0]!.method, "POST");
-    assert.equal(
-      new URL(calls[0]!.url).pathname,
-      "/groceries-api/gol-services/slot/v1/slot/reservation",
-    );
-    const body = JSON.parse(calls[0]!.body!);
-    assert.deepEqual(body, {
-      booking_key: "abc==",
-      changes_confirmed: false,
-      new_slot_date: "2026-05-26T13:00:00Z",
-      new_store_number: "2168",
-    });
-  });
 });

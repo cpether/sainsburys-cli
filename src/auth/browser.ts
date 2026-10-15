@@ -1,69 +1,76 @@
 import { chromium, type BrowserContext } from "playwright";
-import { dirname, join } from "node:path";
-import { mkdir } from "node:fs/promises";
-
-const DEFAULT_USER_AGENT =
-  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36";
-
-const STEALTH_INIT_SCRIPT = `
-  Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-  Object.defineProperty(navigator, 'languages', { get: () => ['en-GB', 'en'] });
-  Object.defineProperty(navigator, 'platform', { get: () => 'Linux x86_64' });
-  Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
-  Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
-  const fakePlugins = [
-    { name: 'PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-    { name: 'Chrome PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-    { name: 'Chromium PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-  ];
-  Object.defineProperty(navigator, 'plugins', { get: () => fakePlugins });
-  Object.defineProperty(navigator, 'mimeTypes', { get: () => [{ type: 'application/pdf' }] });
-  if (!('chrome' in window)) { window.chrome = { runtime: {}, app: {}, csi: () => {}, loadTimes: () => {} }; }
-  const origQuery = window.navigator.permissions && window.navigator.permissions.query;
-  if (origQuery) {
-    window.navigator.permissions.query = (params) =>
-      params && params.name === 'notifications'
-        ? Promise.resolve({ state: Notification.permission })
-        : origQuery.call(window.navigator.permissions, params);
-  }
-  const origGetParameter = WebGLRenderingContext.prototype.getParameter;
-  WebGLRenderingContext.prototype.getParameter = function(parameter) {
-    if (parameter === 37445) return 'Intel Inc.';
-    if (parameter === 37446) return 'Intel Iris OpenGL Engine';
-    return origGetParameter.call(this, parameter);
-  };
-`;
+import { createHash, randomUUID } from "node:crypto";
+import { join } from "node:path";
+import { mkdir, rm, rmdir } from "node:fs/promises";
+import { privateDirectory, profileRoot, temporaryProfileRoot } from "./session.js";
+import { registerCleanup, throwIfInterrupted } from "./lifecycle.js";
 
 export interface LaunchOptions {
-  /** Path to the session.json file — used to derive the userDataDir alongside it. */
   sessionPath: string;
+  accountEmail?: string;
   headless: boolean;
+  /** false uses a fresh private profile removed when the context closes. */
+  persist?: boolean;
 }
 
-export function browserDataDir(sessionPath: string): string {
-  return join(dirname(sessionPath), "browser-data");
+export function browserDataDir(sessionPath: string, accountEmail = "unidentified"): string {
+  const account = createHash("sha256").update(accountEmail.trim().toLowerCase()).digest("hex");
+  return join(profileRoot(sessionPath), account);
 }
 
-/**
- * Launch a persistent Chromium context configured the way Sainsbury's expects.
- * The persistent profile keeps Akamai's _abck cookie + ThreatMetrix device trust
- * across runs so headless re-auth and checkout flows don't hit fresh-browser challenges.
- */
+/** Dedicated Playwright Chromium profile. Never uses the user's ordinary browser profile. */
 export async function launchContext(opts: LaunchOptions): Promise<BrowserContext> {
-  const userDataDir = browserDataDir(opts.sessionPath);
-  await mkdir(userDataDir, { recursive: true });
-  const context = await chromium.launchPersistentContext(userDataDir, {
-    headless: opts.headless,
-    channel: "chrome",
-    userAgent: DEFAULT_USER_AGENT,
-    viewport: { width: 1366, height: 900 },
-    locale: "en-GB",
-    timezoneId: "Europe/London",
-    args: [
-      "--disable-blink-features=AutomationControlled",
-      "--disable-features=IsolateOrigins,site-per-process",
-    ],
-  });
-  await context.addInitScript(STEALTH_INIT_SCRIPT);
-  return context;
+  let temporary: string | undefined;
+  const root = temporaryProfileRoot(opts.sessionPath);
+  if (opts.persist === false) {
+    await privateDirectory(root);
+    temporary = join(root, `${process.pid}-${randomUUID()}`);
+    await mkdir(temporary, { mode: 0o700 });
+  }
+  const userDataDir = temporary ?? browserDataDir(opts.sessionPath, opts.accountEmail);
+  let opening: Promise<BrowserContext> | undefined;
+  let originalClose: (() => Promise<void>) | undefined;
+  let closing: Promise<void> | undefined;
+  const cleanup = () => closing ??= (async () => {
+    try {
+      const context = await opening?.catch(() => undefined);
+      if (context) await (originalClose ?? context.close.bind(context))();
+    } finally {
+      if (temporary) {
+        await rm(temporary, { recursive: true, force: true });
+        await rmdir(root).catch((err: NodeJS.ErrnoException) => {
+          if (!["ENOENT", "ENOTEMPTY", "EEXIST"].includes(err.code ?? "")) throw err;
+        });
+      }
+    }
+  })();
+  const unregister = registerCleanup(cleanup);
+  try {
+    opening = (async () => {
+      throwIfInterrupted();
+      if (opts.persist !== false) await privateDirectory(profileRoot(opts.sessionPath));
+      await privateDirectory(userDataDir);
+      throwIfInterrupted();
+      return chromium.launchPersistentContext(userDataDir, {
+        headless: opts.headless,
+        // Our lifecycle handler closes the browser before releasing its profile lock.
+        handleSIGINT: false,
+        handleSIGTERM: false,
+        viewport: { width: 1366, height: 900 },
+        locale: "en-GB",
+        timezoneId: "Europe/London",
+      });
+    })();
+    const context = await opening;
+    originalClose = context.close.bind(context);
+    throwIfInterrupted();
+    context.close = async () => {
+      try { await cleanup(); }
+      finally { unregister(); }
+    };
+    return context;
+  } catch {
+    try { await cleanup(); } finally { unregister(); }
+    throw new Error("Could not launch login browser. Install its Chromium with npm run browser:install; close other login processes and check private storage permissions.");
+  }
 }

@@ -1,47 +1,22 @@
-import { performLogin } from "../auth/login.js";
-import { loadSession, saveSession, type Session } from "../auth/session.js";
+import { loadSession, type Session } from "../auth/session.js";
 import { loadConfig } from "../config.js";
-import { GroceriesClient } from "./http.js";
+import { AuthError, GroceriesClient } from "./http.js";
 
 export interface CreateClientOptions {
-  /** If true, auto-relogin on 401/403. Default true. */
+  /** Retained for compatibility. Browser reauthentication is never automatic. */
   autoReauth?: boolean;
-  /** Use this session instead of loading from disk. */
   session?: Session;
   log?: (msg: string) => void;
 }
 
+/** Agent operations only reuse a cached session. Local login is an explicit human action. */
 export async function createClient(opts: CreateClientOptions = {}): Promise<GroceriesClient> {
   const config = loadConfig();
-  const log = opts.log ?? (() => {});
-
-  let session = opts.session ?? (await loadSession(config.sessionPath));
-  if (!session) {
-    log("no session found; performing login");
-    session = await performLogin({ config, log });
+  const session = opts.session ?? await loadSession(config.sessionPath);
+  if (!session) throw new AuthError(401, "Local login required. Run sainsburys auth login in a local terminal and complete MFA in its browser.");
+  if ((!opts.session && !session.accountEmail) ||
+      (config.email && session.accountEmail?.toLowerCase() !== config.email.toLowerCase())) {
+    throw new AuthError(401, "Cached session has no matching verified account identity. Run local auth login for SAINSBURYS_EMAIL.");
   }
-
-  const client = new GroceriesClient({
-    session,
-    baseUrl: config.baseUrl,
-    reauth:
-      opts.autoReauth === false
-        ? undefined
-        : async () => {
-            log("session rejected; re-authenticating");
-            const fresh = await performLogin({ config, log });
-            await saveSession(config.sessionPath, fresh);
-            return fresh;
-          },
-  });
-
-  return client;
-}
-
-export function inferStoreNumber(client: GroceriesClient, override?: string): string {
-  if (override) return override;
-  const fromSession = client.getSession().storeNumber;
-  if (fromSession) return fromSession;
-  // Fallback: Sainsbury's own generic pre-slot default (not user-specific).
-  return "2168";
+  return new GroceriesClient({ session, baseUrl: config.baseUrl });
 }

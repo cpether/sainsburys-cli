@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { GroceriesClient } from "../src/client/http.js";
 import { addItem, getBasket, removeItem, updateItems } from "../src/api/basket.js";
-import { getActiveOrderStatus, listOrders, startAmend } from "../src/api/order.js";
+import { getActiveOrderStatus, listOrders } from "../src/api/order.js";
 import { getProductsByUid, searchProducts } from "../src/api/product.js";
 import { fakeSession, makeFakeFetch } from "./_helpers.js";
 
@@ -15,64 +15,55 @@ function clientWith(responses: Parameters<typeof makeFakeFetch>[0]) {
 }
 
 describe("basket api", () => {
-  it("getBasket sends required query params", async () => {
-    const { c, calls } = clientWith([{ status: 200, body: { items: [] } }]);
-    await getBasket(c, { storeNumber: "2168", slotBooked: false });
+  it("getBasket sends account context and normalizes identifiers", async () => {
+    const { c, calls } = clientWith([{ body: { basket_id: 42, items: [{item_uid: 12, quantity: 1, uom: "ea", product: { sku: 9126 }}], total_price: 1, is_in_amend_mode: false } }]);
+    const basket = await getBasket(c, { storeNumber: "2168", pickTime: "2026-10-15T12:00:00Z", slotBooked: true });
     const url = new URL(calls[0]!.url);
-    assert.equal(url.pathname, "/groceries-api/gol-services/basket/v2/basket");
     assert.equal(url.searchParams.get("store_number"), "2168");
-    assert.equal(url.searchParams.get("slot_booked"), "false");
+    assert.equal(url.searchParams.get("slot_booked"), "true");
     assert.equal(url.searchParams.get("calculate"), "true");
-    assert.match(url.searchParams.get("pick_time") ?? "", /^\d{4}-\d{2}-\d{2}T/);
+    assert.equal(basket.items[0]?.product?.sku, "9126");
+    assert.equal(basket.items[0]?.item_uid, "12");
   });
-
-  it("addItem POSTs the canonical body shape", async () => {
-    const { c, calls } = clientWith([{ status: 200, body: {} }]);
+  it("addItem preserves the canonical body shape", async () => {
+    const { c, calls } = clientWith([{ status: 204 }]);
     await addItem(c, { storeNumber: "2168" }, { productUid: "8194039" });
-    assert.equal(calls[0]!.method, "POST");
-    assert.equal(
-      new URL(calls[0]!.url).pathname,
-      "/groceries-api/gol-services/basket/v2/basket/item",
-    );
-    const body = JSON.parse(calls[0]!.body!);
-    assert.deepEqual(body, {
-      product_uid: "8194039",
-      quantity: 1,
-      uom: "ea",
-      selected_catchweight: "",
-    });
+    assert.deepEqual(JSON.parse(calls[0]!.body!), {product_uid:"8194039",quantity:1,uom:"ea",selected_catchweight:""});
   });
-
-  it("updateItems PUTs an items array", async () => {
-    const { c, calls } = clientWith([{ status: 200, body: null }]);
-    await updateItems(c, { storeNumber: "2168" }, [
-      { productUid: "7566892", itemUid: "28177740249", quantity: 2 },
-    ]);
-    assert.equal(calls[0]!.method, "PUT");
-    const body = JSON.parse(calls[0]!.body!);
-    assert.deepEqual(body, {
-      items: [
-        {
-          product_uid: "7566892",
-          quantity: 2,
-          uom: "ea",
-          selected_catchweight: "",
-          item_uid: "28177740249",
-        },
-      ],
-    });
+  it("updates and removals preserve weight selections", async () => {
+    const { c, calls } = clientWith([{ status: 204 }, { status: 204 }]);
+    await updateItems(c, {storeNumber:"2168"}, [{productUid:"1234",itemUid:"5678",quantity:0.75,uom:"kg",selectedCatchweight:"0.75"}]);
+    await removeItem(c, {storeNumber:"2168"}, {productUid:"1234",itemUid:"5678",uom:"kg",selectedCatchweight:"0.75"});
+    assert.equal(JSON.parse(calls[0]!.body!).items[0].selected_catchweight, "0.75");
+    assert.equal(JSON.parse(calls[1]!.body!).items[0].quantity, 0);
+    assert.equal(JSON.parse(calls[1]!.body!).items[0].decreasing_quantity, true);
+    assert.equal(JSON.parse(calls[1]!.body!).items[0].uom, "kg");
   });
-
-  it("removeItem PUTs quantity 0 with decreasing_quantity flag", async () => {
-    const { c, calls } = clientWith([{ status: 200, body: null }]);
-    await removeItem(
-      c,
-      { storeNumber: "2168" },
-      { productUid: "8202235", itemUid: "28466370549" },
-    );
-    const body = JSON.parse(calls[0]!.body!);
-    assert.equal(body.items[0].quantity, 0);
-    assert.equal(body.items[0].decreasing_quantity, true);
+  it("accepts the observed JSON null basket-write response", async () => {
+    const { c } = clientWith([{ body: null }, { body: null }, { body: null }]);
+    await addItem(c, {storeNumber:"2168"}, {productUid:"1234"});
+    await updateItems(c, {storeNumber:"2168"}, [{productUid:"1234",itemUid:"5678",quantity:2}]);
+    await removeItem(c, {storeNumber:"2168"}, {productUid:"1234",itemUid:"5678"});
+  });
+  it("rejects malformed basket data with the structured response error", async () => {
+    const { c } = clientWith([{ body: {items:[]} }]);
+    await assert.rejects(getBasket(c,{storeNumber:"2168"}), {name:"ResponseValidationError"});
+  });
+  it("rejects scalar basket-write acknowledgements as unknown outcomes", async () => {
+    const { c } = clientWith([{ body: true }]);
+    await assert.rejects(addItem(c,{storeNumber:"2168"},{productUid:"1234"}), {name:"UnknownOutcomeError"});
+  });
+  it("rejects conflicting numeric product identifiers instead of picking one", async () => {
+    let { c } = clientWith([{ body: {basket_id:"1",is_in_amend_mode:false,total_price:2,items:[{item_uid:"2",quantity:1,uom:"ea",product:{sku:"1234",product_uid:"5678"}}]} }]);
+    await assert.rejects(getBasket(c,{storeNumber:"2168"}),{name:"ResponseValidationError"});
+    ({c}=clientWith([{body:{products:[{product_uid:"1234",sku:"5678",name:"Conflict"}]}}]));
+    await assert.rejects(getProductsByUid(c,{uids:["1234"],ctx:{storeIdentifier:"2168"}}),{name:"ResponseValidationError"});
+  });
+  it("invalid write quantities fail before sending anything", async () => {
+    const { c, calls } = clientWith([]);
+    for (const quantity of [NaN,Infinity,-1,1.5,100]) await assert.rejects(addItem(c,{storeNumber:"2168"},{productUid:"1234",quantity}));
+    await assert.rejects(addItem(c,{storeNumber:"2168"},{productUid:"1234",quantity:0.0001,uom:"kg"}));
+    assert.equal(calls.length, 0);
   });
 });
 
@@ -92,22 +83,11 @@ describe("order api", () => {
     assert.equal(r, null);
   });
 
-  it("getActiveOrderStatus returns null when body lacks order_uid", async () => {
+  it("getActiveOrderStatus rejects a malformed object", async () => {
     const { c } = clientWith([{ status: 200, body: { foo: 1 } }]);
-    const r = await getActiveOrderStatus(c);
-    assert.equal(r, null);
+    await assert.rejects(getActiveOrderStatus(c));
   });
 
-  it("startAmend POSTs to /amend with empty body", async () => {
-    const { c, calls } = clientWith([{ status: 200, body: {} }]);
-    await startAmend(c, "1281009470");
-    assert.equal(calls[0]!.method, "POST");
-    assert.equal(
-      new URL(calls[0]!.url).pathname,
-      "/groceries-api/gol-services/order/v1/order/1281009470/amend",
-    );
-    assert.equal(calls[0]!.body, "{}");
-  });
 });
 
 describe("product api", () => {

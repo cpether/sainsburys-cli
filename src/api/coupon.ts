@@ -1,3 +1,4 @@
+import { record, string, finiteNumber, boolean, ValidationError } from "./validation.js";
 import type { GroceriesClient } from "../client/http.js";
 
 export interface CouponPromotion {
@@ -43,30 +44,11 @@ export interface CouponListResponse {
 export async function listCoupons(client: GroceriesClient): Promise<CouponListResponse> {
   return client.request<CouponListResponse>(
     "/groceries-api/gol-services/coupon/v1/coupon",
+    { validate: value => {
+      const r=record(value);
+      if(!Array.isArray(r.coupons)) throw new ValidationError("Invalid coupons response");
+      for(const value of r.coupons){const c=record(value);string(c.code);const p=record(c.promotion);finiteNumber(p.value);boolean(p.is_already_applied_to_cart);}
+      return r as unknown as CouponListResponse;
+    } },
   );
 }
-
-export interface ApplyCouponArgs {
-  /** Order id from /order/status — for amend flows, this is the draft basket id from /basket. */
-  orderId: string;
-  /** Numeric promotion id from coupon.promotion.promotion_id. */
-  promoId: number | string;
-  /** WCS-internal store catalog id. Observed value: 10151 (not the same as the 4-digit store_number). */
-  storeId?: string;
-  langId?: string;
-  /** "A" = apply (default), "R" = remove. */
-  taskType?: "A" | "R";
-}
-
-/**
- * NOTE: applying a coupon happens via the legacy WebSphere Commerce endpoint
- * `/shop/PromotionCodeManage?taskType=A&orderId=…&promoId=…&storeId=10151&langId=44`,
- * which Akamai's bot-check rejects when called directly from our HTTP client (returns
- * an "enable cookies/JavaScript" HTML fallback). It only works when triggered from a
- * real browser context.
- *
- * The apply is therefore done inside the Playwright-driven checkout flow
- * (`src/checkout/finalise.ts`) by clicking the SPA anchors with id `walletVoucher<CODE>`.
- * No standalone applyCoupon HTTP function exists — see finaliseCheckout for the click
- * sequence.
- */

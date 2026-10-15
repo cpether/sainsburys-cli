@@ -1,270 +1,177 @@
-import { type Page, type Request } from "playwright";
+import { type BrowserContext, type Request } from "playwright";
+import { resolve } from "node:path";
 import type { Config } from "../config.js";
-import { launchContext } from "./browser.js";
-import {
-  type Session,
-  type SessionCookie,
-  parseWcauthtoken,
-  saveSession,
-} from "./session.js";
-import { defaultMfaProvider, type MfaCodeProvider } from "./mfa-providers.js";
-
-const DEFAULT_USER_AGENT =
-  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36";
+import { launchContext, type LaunchOptions } from "./browser.js";
+import { type Session, type SessionCookie, parseWcauthtoken, saveSession, withAuthLock } from "./session.js";
+import { GroceriesClient } from "../client/http.js";
+import { MFA_INSTRUCTIONS } from "./mfa-providers.js";
+import { registerCleanup, throwIfInterrupted } from "./lifecycle.js";
 
 export interface LoginOptions {
   config: Config;
-  /** Force headed browser even if config.headed is false. Useful for debugging. */
+  /** Login is always local and headed. Retained for compatibility. */
   headed?: boolean;
-  /** Persist session to disk after capture. Default true. */
   persist?: boolean;
-  /** Logger for progress output. Default no-op. */
   log?: (msg: string) => void;
-  /**
-   * Asked to provide an SMS MFA code when the form appears, given the moment the form
-   * was submitted (so the provider can ignore stale codes). Default: con chat polling
-   * if `config.mfaChatRoomId` is set, otherwise stdin prompt.
-   */
-  mfaCodeProvider?: MfaCodeProvider;
+  /** Dependency injection for isolated tests; never supplied by CLI input. */
+  launch?: (opts: LaunchOptions) => Promise<BrowserContext>;
+  timeoutMs?: number;
 }
 
-/**
- * Drive a Chromium browser through Sainsbury's full OAuth login.
- * Captures session cookies + the wcauthtoken HMAC by intercepting outgoing
- * /groceries-api/ requests after redirect back to the SPA.
- */
-export async function performLogin(opts: LoginOptions): Promise<Session> {
+const activeLogins = new Map<string, Promise<Session>>();
+const ORIGIN = "https://www.sainsburys.co.uk";
+class LocalLoginError extends Error {}
+
+/** A single manual login per session path, including callers in the same process. */
+export function performLogin(opts: LoginOptions): Promise<Session> {
+  opts = { ...opts, config: {
+    email: opts.config.email, sessionPath: resolve(opts.config.sessionPath),
+    storeNumber: opts.config.storeNumber, headed: opts.config.headed,
+    baseUrl: opts.config.baseUrl, loginBaseUrl: opts.config.loginBaseUrl,
+  } };
+  const key = `${opts.config.sessionPath}:${opts.persist !== false}`;
+  const existing = activeLogins.get(key);
+  if (existing) {
+    // A competing account must never inherit another account's login promise.
+    return existing.then((session) => {
+      if (session.accountEmail !== opts.config.email.trim().toLowerCase()) throw new Error("Another account login is in progress.");
+      return session;
+    });
+  }
+  const work = login(opts).finally(() => activeLogins.delete(key));
+  activeLogins.set(key, work);
+  return work;
+}
+
+async function login(opts: LoginOptions): Promise<Session> {
   const { config, log = () => {} } = opts;
-  const headless = !(opts.headed ?? config.headed);
-  log(`launching chromium (headless=${headless})`);
-  // Persistent context keeps Akamai's _abck cookie + ThreatMetrix device fingerprint
-  // across runs, which dramatically reduces the chance of being challenged on subsequent
-  // headless logins.
-  const context = await launchContext({ sessionPath: config.sessionPath, headless });
-  try {
-    const page = await context.newPage();
-
-    // We need both `wcauthtoken` (WCS session HMAC, on every request) AND
-    // `authorization: Bearer <Hydra-JWT>` (sent on essentially every /groceries-api/ call,
-    // and mandatory for writes — basket POST/PUT etc. return 401 without it).
-    let capturedWc: string | undefined;
-    let capturedBearer: string | undefined;
-    const wcPromise = new Promise<string>((resolve) => {
-      const onRequest = (req: Request) => {
-        if (capturedWc) return;
-        const url = req.url();
-        if (!url.includes("/groceries-api/")) return;
-        const token = req.headers()["wcauthtoken"];
-        if (token && token.length > 0 && token !== '""') {
-          capturedWc = token;
-          resolve(token);
-        }
-      };
-      page.on("request", onRequest);
-    });
-    const bearerPromise = new Promise<string>((resolve) => {
-      const onRequest = (req: Request) => {
-        if (capturedBearer) return;
-        const url = req.url();
-        if (!url.includes("/groceries-api/")) return;
-        const auth = req.headers()["authorization"];
-        if (auth && auth.toLowerCase().startsWith("bearer ")) {
-          capturedBearer = auth.slice(7).trim();
-          resolve(capturedBearer);
-        }
-      };
-      page.on("request", onRequest);
-    });
-
-    log("navigating to login");
-    await page.goto(`${config.baseUrl}/gol-ui/groceries`, { waitUntil: "domcontentloaded" });
-
-    await dismissCookieBanner(page, log);
-
-    await page.goto(`${config.baseUrl}/gol-ui/my-account/orders`, { waitUntil: "domcontentloaded" });
-
-    // After domcontentloaded the SPA may still client-side-redirect to Hydra (e.g.
-    // because the cached cookies expired). Wait for network to go idle so any
-    // post-load redirect settles before we decide whether to fill the login form.
-    await page.waitForLoadState("networkidle", { timeout: 15_000 }).catch(() => {});
-
-    const alreadyAuthed =
-      /\/gol-ui\/my-account\//.test(page.url()) &&
-      !/account\.sainsburys\.co\.uk/.test(page.url());
-    if (alreadyAuthed) {
-      log("persistent context is already authenticated — skipping login form");
-    } else {
-      log("waiting for hydra login form");
-      await page.waitForURL(/account\.sainsburys\.co\.uk\/gol\/login/, { timeout: 30_000 });
-
-      await dismissCookieBanner(page, log);
-
-      log("filling credentials");
-      await page.fill('input[name="username"]', config.email);
-      await page.fill('input[name="password"]', config.password);
-
-      // Give Hydra's JS a moment to compute ioBlackBox before submitting.
-      await page.waitForTimeout(500);
-
-      log("submitting login form");
-      const submittedAt = Date.now();
-      await page.click('button[data-testid="log-in"], button[type="submit"]');
-
-      const mfaProvider =
-        opts.mfaCodeProvider ??
-        defaultMfaProvider({
-          conBin: config.conBin,
-          mfaChatRoomId: config.mfaChatRoomId,
-          log,
-        });
-      await waitForLoggedIn(page, log, mfaProvider, submittedAt);
-    }
-
-    log("logged in; waiting for wcauthtoken + bearer JWT");
-    // The SPA bootstraps after login by hitting several /groceries-api/ endpoints; our
-    // listeners will catch the first one carrying each header. If we land on a page that
-    // doesn't trigger bootstrap (e.g. it's served from cache because the persistent context
-    // already had it), force-navigate to a different page that always fires API calls.
-    // Cache-bust query param ensures the navigation isn't a no-op.
-    const navTimeout = setTimeout(() => {
-      const bust = Date.now();
-      page
-        .goto(`${config.baseUrl}/gol-ui/trolley?_=${bust}`, { waitUntil: "domcontentloaded" })
-        .catch(() => {});
-    }, 3_000);
-
-    const timeout = (ms: number, label: string) =>
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error(`timed out waiting for ${label}`)), ms),
-      );
-    let wcauthtoken: string;
-    let bearerToken: string;
-    try {
-      [wcauthtoken, bearerToken] = await Promise.all([
-        Promise.race([wcPromise, timeout(45_000, "wcauthtoken")]),
-        Promise.race([bearerPromise, timeout(45_000, "bearer JWT")]),
-      ]);
-    } catch (err) {
-      const snap = `/tmp/sainsburys-login-timeout-${Date.now()}.png`;
-      await page.screenshot({ path: snap, fullPage: true }).catch(() => {});
-      log(`token capture failed; screenshot at ${snap}, url=${page.url()}`);
-      throw err;
-    } finally {
-      clearTimeout(navTimeout);
-    }
-
-    const cookies = (await context.cookies()).filter((c) =>
-      c.domain.endsWith("sainsburys.co.uk"),
-    );
-
-    const sessionCookies: SessionCookie[] = cookies.map((c) => ({
-      name: c.name,
-      value: c.value,
-      domain: c.domain,
-      path: c.path,
-      expires: c.expires === -1 ? undefined : c.expires,
-      httpOnly: c.httpOnly,
-      secure: c.secure,
-      sameSite:
-        c.sameSite === "Strict" || c.sameSite === "Lax" || c.sameSite === "None"
-          ? c.sameSite
-          : undefined,
-    }));
-
-    const { userId } = parseWcauthtoken(wcauthtoken);
-
-    const session: Session = {
-      cookies: sessionCookies,
-      wcauthtoken,
-      bearerToken,
-      userId,
-      storeNumber: config.storeNumber,
-      capturedAt: Date.now(),
-      userAgent: DEFAULT_USER_AGENT,
-    };
-
-    if (opts.persist !== false) {
-      await saveSession(config.sessionPath, session);
-      log(`session saved to ${config.sessionPath}`);
-    }
-
+  const email = config.email.trim().toLowerCase();
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw new Error("Set SAINSBURYS_EMAIL to the account you will log into; no password is required in configuration.");
+  }
+  if (config.baseUrl !== ORIGIN) throw new Error("Login is restricted to the Sainsbury's HTTPS origin.");
+  const run = async () => {
+    const session = await captureLogin(opts, email, log);
+    throwIfInterrupted();
+    if (opts.persist !== false) await saveSession(config.sessionPath, session);
     return session;
-  } finally {
-    await context.close().catch(() => {});
-  }
+  };
+  return opts.persist === false ? run() : withAuthLock(`${config.sessionPath}.profile.lock`, run);
 }
 
-async function waitForLoggedIn(
-  page: Page,
-  log: (msg: string) => void,
-  mfaCodeProvider: MfaCodeProvider,
-  submittedAt: number,
-): Promise<void> {
-  const goluiRe = /www\.sainsburys\.co\.uk\/gol-ui\//;
-  const mfaRe = /account\.sainsburys\.co\.uk\/gol\/login\/mfa/;
-
+async function captureLogin(opts: LoginOptions, email: string, log: (msg: string) => void): Promise<Session> {
+  const { config } = opts;
+  const context = await (opts.launch ?? launchContext)({
+    sessionPath: config.sessionPath, accountEmail: email, headless: false, persist: opts.persist,
+  });
+  let closing: Promise<void> | undefined;
+  const close = () => closing ??= context.close();
+  const unregister = registerCleanup(close);
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    await page.waitForURL((url) => goluiRe.test(url.toString()) || mfaRe.test(url.toString()), {
-      timeout: 60_000,
+    throwIfInterrupted();
+    const page = await context.newPage();
+    let wcauthtoken: string | undefined;
+    let bearerToken: string | undefined;
+    let resolveTokens!: () => void;
+    const tokens = new Promise<void>((resolve) => { resolveTokens = resolve; });
+    const onRequest = (req: Request) => {
+      let url: URL;
+      try { url = new URL(req.url()); } catch { return; }
+      if (url.origin !== ORIGIN || !url.pathname.startsWith("/groceries-api/")) return;
+      const headers = req.headers();
+      const wc = headers["wcauthtoken"];
+      const auth = headers["authorization"];
+      if (wc && wc !== '\"\"') {
+        try { parseWcauthtoken(wc); wcauthtoken = wc; } catch { /* ignore guest token */ }
+      }
+      if (auth?.toLowerCase().startsWith("bearer ") && auth.slice(7).trim()) bearerToken = auth.slice(7).trim();
+      if (wcauthtoken && bearerToken) resolveTokens();
+    };
+    page.on("request", onRequest);
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new LocalLoginError("Local login timed out. Complete login and MFA in the browser, then retry auth login.")), opts.timeoutMs ?? 300_000);
     });
-  } catch {
-    await snapAndThrow(page, "after login submit");
-  }
-
-  if (mfaRe.test(page.url())) {
-    log("MFA required");
-    const code = await mfaCodeProvider(submittedAt);
-    if (!/^\d{4,8}$/.test(code)) throw new Error(`invalid MFA code (expected digits): ${code}`);
-
-    const codeInput = page
-      .locator('input[type="tel"], input[inputmode="numeric"], input[name*="code" i]')
-      .first();
-    await codeInput.fill(code);
-    await page.click('button[type="submit"], button:has-text("Continue")');
-
+    log(MFA_INSTRUCTIONS);
     try {
-      await page.waitForURL(goluiRe, { timeout: 60_000 });
-    } catch {
-      await snapAndThrow(page, "after MFA submit");
+      await Promise.race([
+        (async () => {
+          await page.goto(`${ORIGIN}/gol-ui/my-account/orders`, { waitUntil: "domcontentloaded", timeout: 30_000 });
+          if (!wcauthtoken || !bearerToken) {
+            // Reused profiles can serve a cached account page with no API bootstrap.
+            // Wait for the user's login redirect, then visit the trolley to capture a
+            // fresh authenticated request. Never navigate away while MFA is being entered.
+            await page.waitForURL((url) => url.origin === ORIGIN && url.pathname.startsWith("/gol-ui/"), {
+              timeout: opts.timeoutMs ?? 300_000,
+            });
+            await page.goto(`${ORIGIN}/gol-ui/trolley`, { waitUntil: "domcontentloaded", timeout: 30_000 });
+          }
+          await tokens;
+        })(),
+        deadline,
+      ]);
+      if (!wcauthtoken || !bearerToken) throw new LocalLoginError("Login did not capture authenticated API credentials.");
+      const cookies = (await context.cookies()).filter((c) => {
+        const domain = c.domain.replace(/^\./, "");
+        return domain === "sainsburys.co.uk" || domain.endsWith(".sainsburys.co.uk");
+      });
+      const sessionCookies: SessionCookie[] = cookies.map((c) => ({
+        name: c.name, value: c.value, domain: c.domain, path: c.path,
+        expires: c.expires === -1 ? undefined : c.expires,
+        httpOnly: c.httpOnly, secure: c.secure, sameSite: c.sameSite,
+      }));
+      const session: Session = {
+        cookies: sessionCookies, wcauthtoken, bearerToken,
+        userId: parseWcauthtoken(wcauthtoken).userId,
+        capturedAt: Date.now(),
+        userAgent: await page.evaluate(() => navigator.userAgent),
+      };
+      // Perform an authenticated read using browser transport. This verifies the account
+      // before exporting credentials or accepting an already-authenticated profile.
+      const client = new GroceriesClient({
+        session, baseUrl: ORIGIN,
+        fetchImpl: async (input, init) => {
+          const result = await context.request.get(String(input), {
+            headers: Object.fromEntries(new Headers(init?.headers).entries()),
+            maxRedirects: 0, timeout: 15_000,
+          });
+          return new Response(await result.body(), { status: result.status(), headers: result.headers() });
+        },
+      });
+      const result: unknown = await client.request("/groceries-api/gol-services/customer/v1/customer/profile");
+      const profile = identityProfile(result);
+      if (String(profile.user_id) !== session.userId || profile.email.trim().toLowerCase() !== email) {
+        throw new LocalLoginError("Authenticated browser account does not match SAINSBURYS_EMAIL. Log out in the local browser and retry with the intended account.");
+      }
+      session.accountEmail = email;
+      log("Account identity verified; local login complete.");
+      return session;
+    } finally {
+      page.off("request", onRequest);
     }
+  } catch (err) {
+    if (err instanceof LocalLoginError) throw err;
+    throw new LocalLoginError("Local browser login failed. Check the browser window and retry auth login; credentials were not persisted.");
+  } finally {
+    if (timer) clearTimeout(timer);
+    // Browser errors can include URLs and page contents. Do not expose those details.
+    try {
+      await close().catch(() => {
+        throw new LocalLoginError("Could not close the login browser or clean its temporary profile. Close it locally and inspect private authentication storage before retrying.");
+      });
+    } finally { unregister(); }
   }
 }
 
-async function snapAndThrow(page: Page, where: string): Promise<never> {
-  const here = page.url();
-  const visibleErr = await page
-    .locator('[role="alert"], .ln-c-form-group__error-message, .ln-c-message')
-    .first()
-    .innerText()
-    .catch(() => "");
-  const screenshotPath = `/tmp/sainsburys-login-fail-${Date.now()}.png`;
-  await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
-  throw new Error(
-    `login failed ${where}. URL: ${here}. visible error: ${visibleErr || "(none)"}. screenshot: ${screenshotPath}`,
-  );
-}
-
-async function dismissCookieBanner(page: Page, log: (msg: string) => void): Promise<void> {
-  // OneTrust uses #onetrust-accept-btn-handler; Sainsbury's also has plain "Accept all" buttons.
-  const selectors = [
-    "#onetrust-accept-btn-handler",
-    'button:has-text("Accept all")',
-    'button:has-text("Accept All")',
-  ];
-  for (const sel of selectors) {
-    try {
-      const button = page.locator(sel).first();
-      await button.waitFor({ timeout: 3_000, state: "visible" });
-      await button.click({ timeout: 2_000 });
-      log(`dismissed cookie banner (${sel})`);
-      // OneTrust fades out an overlay after click; wait for it to clear.
-      await page
-        .locator(".onetrust-pc-dark-filter")
-        .waitFor({ state: "hidden", timeout: 5_000 })
-        .catch(() => {});
-      return;
-    } catch {
-      /* try next selector */
-    }
+function identityProfile(value: unknown): { user_id: string | number; email: string } {
+  if (!value || typeof value !== "object") throw new LocalLoginError("Customer identity response is invalid.");
+  const outer = value as Record<string, unknown>;
+  const profile = outer.customer && typeof outer.customer === "object"
+    ? outer.customer as Record<string, unknown> : outer;
+  const email = profile.email ?? profile.email_address;
+  if ((typeof profile.user_id !== "string" && typeof profile.user_id !== "number") ||
+      typeof email !== "string" || !email) {
+    throw new LocalLoginError("Customer response did not provide a verifiable user ID and email. Login was not persisted.");
   }
+  return { user_id: profile.user_id, email };
 }
