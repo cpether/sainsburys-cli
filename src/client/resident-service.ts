@@ -132,6 +132,16 @@ export async function residentStatus(sessionPath: string): Promise<{ running: bo
   return { running: true, authenticated: result.authenticated === true, needsLogin: result.needsLogin !== false };
 }
 
+export async function residentAuthenticationDiagnostic(sessionPath: string): Promise<Record<string, unknown>> {
+  const result = await residentRpc(sessionPath, {operation:"diagnose"}, 30_000);
+  const d = result.diagnostic as Record<string, unknown> | undefined;
+  if (!d || !["retailer","account_sign_in","account_other","other","absent"].includes(String(d.page)) ||
+      [d.authenticated,d.passwordFieldVisible,d.mfaFieldVisible,d.storedCredentialsAvailable].some(v=>typeof v!=="boolean") ||
+      !Number.isInteger(d.credentialPairsObserved) || Number(d.credentialPairsObserved)<0 || Number(d.credentialPairsObserved)>16) throw new ResidentRpcError("PROTOCOL");
+  return {authenticated:d.authenticated,page:d.page,passwordFieldVisible:d.passwordFieldVisible,
+    mfaFieldVisible:d.mfaFieldVisible,credentialPairsObserved:d.credentialPairsObserved,storedCredentialsAvailable:d.storedCredentialsAvailable};
+}
+
 export async function ensureResidentService(config: Config, expected?: {userId: string; authGeneration?: string}): Promise<void> {
   const paths = residentServicePaths(config.sessionPath);
   await prepareResidentDirectory(paths);

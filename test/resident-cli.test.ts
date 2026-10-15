@@ -39,11 +39,14 @@ test('real CLI reuses one resident service across plans, readback and logout wit
     login: async () => { logins++; throw new Error('An ordinary operation must never start interactive login'); },
     getSession: () => session,
     status: () => ({ authenticated: true, needsLogin: false }),
+    diagnoseAuthentication: async () => ({authenticated:true,page:'retailer' as const,passwordFieldVisible:false,mfaFieldVisible:false,credentialPairsObserved:1,storedCredentialsAvailable:true,unexpectedSecret:'must-not-export'}),
     close: async () => { closes++; },
     request: async (input: { url: string; method: string; body?: string }) => {
       const url = new URL(input.url); let body: unknown;
       if (url.pathname.endsWith('/customer/profile')) body = { user_id: session.userId, email: session.accountEmail, store_number: '0123' };
       else if (url.pathname.endsWith('/slot/reservation') || url.pathname.endsWith('/order/status')) body = null;
+      else if (url.pathname.endsWith('/order/123')) body = {order_uid:'123',status:'Delivered',total:2,order_items:[]};
+      else if (url.pathname.endsWith('/order')) body = {orders:[{order_uid:'123',status:'Delivered',total:2}]};
       else if (url.pathname.endsWith('/product')) body = { products: [{ product_uid: '12345', name: 'Dummy pot', is_available: true, retail_price: { price: 2, measure: 'ea' } }] };
       else if (url.pathname.endsWith('/basket') || url.pathname.endsWith('/basket/item')) {
         if (input.method !== 'GET') {
@@ -64,6 +67,11 @@ test('real CLI reuses one resident service across plans, readback and logout wit
     for (let i = 0; i < 100 && !ready; i++) { ready = (await residentStatus(path)).running; if (!ready) await new Promise(done => setTimeout(done, 20)); }
     assert.ok(ready, 'Dummy resident service became available');
     assert.equal((await invoke(home, path, ['basket', 'show'])).items.length, 0);
+    assert.deepEqual(await invoke(home, path, ['auth', 'diagnose']),{authenticated:true,page:'retailer',passwordFieldVisible:false,mfaFieldVisible:false,credentialPairsObserved:1,storedCredentialsAvailable:true});
+    assert.equal((await invoke(home, path, ['order', 'list', '--page-size', '5'])).orders[0].order_uid, '123');
+    assert.deepEqual((await invoke(home, path, ['order', 'get', '123'])).order_items, []);
+    assert.equal((await invoke(home, path, ['order', 'get', '123/amend'], 1)).ok, false);
+    assert.equal((await invoke(home, path, ['order', 'list', '--page-size', '0'], 1)).ok, false);
     const targets = join(home, 'targets.json'), planPath = join(home, 'plan.json');
     await writeFile(targets, '[{"sku":"12345","quantity":1,"uom":"ea"}]', { mode: 0o600 });
     const plan = await invoke(home, path, ['basket', 'plan', targets, '--max-total', '4', '--max-quantity', '2', '--out', planPath]);

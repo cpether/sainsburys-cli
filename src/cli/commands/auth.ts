@@ -3,10 +3,18 @@ import { performLogin } from "../../auth/login.js";
 import { loadSession } from "../../auth/session.js";
 import { loadConfig, loadConfigPartial } from "../../config.js";
 import { printData, printError, exitCodeFor } from "../output.js";
-import { logoutResidentSession, residentLogin, residentStatus, stopResidentService } from "../../client/resident-service.js";
+import { logoutResidentSession, residentLogin, residentStatus, residentAuthenticationDiagnostic, stopResidentService } from "../../client/resident-service.js";
 
 export function authCommand(): Command {
   const cmd = new Command("auth").description("Manage Sainsbury's session credentials");
+
+  cmd.command("diagnose").description("Read fixed session and sign-in form categories without login or navigation")
+    .action(async (_opts, ref) => {
+      try {
+        const result = await residentAuthenticationDiagnostic(loadConfigPartial().sessionPath);
+        printData({format:ref.optsWithGlobals().json ? "json" : "text"},result,()=>JSON.stringify(result,null,2));
+      } catch (err) { printError(err); process.exitCode=exitCodeFor(err); }
+    });
 
   cmd
     .command("login")

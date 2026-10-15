@@ -17,6 +17,7 @@ export interface ResidentEngine {
   getSession(): Session | undefined;
   getSessionBinding?(): { userId: string; authGeneration?: string } | undefined;
   status(): { authenticated: boolean; needsLogin: boolean };
+  diagnoseAuthentication?(): Promise<import("./resident-browser.js").AuthenticationDiagnostic>;
   close(): Promise<void>;
 }
 export type ResidentEngineFactory = (options: { config: Config; session?: Session }) => ResidentEngine;
@@ -141,7 +142,7 @@ export async function runResidentService(config: Config, engineFactory: Resident
             await initial.catch(() => {});
             if (Date.now() >= deadlineMs) throw new RequestTimeoutError();
             if (controller.signal.aborted || stopping) throw new RequestCancelledError();
-            if (operation !== "login" && operation !== "request") throw new Error("Invalid resident operation.");
+            if (operation !== "login" && operation !== "request" && operation !== "diagnose") throw new Error("Invalid resident operation.");
             // A queued client may have timed out before its FIN reaches this event
             // loop. Require a fresh acknowledgement before touching the browser.
             await new Promise<void>((done, reject) => {
@@ -153,6 +154,10 @@ export async function runResidentService(config: Config, engineFactory: Resident
             });
             if (Date.now() >= deadlineMs) throw new RequestTimeoutError();
             if (controller.signal.aborted || stopping) throw new RequestCancelledError();
+            if (operation === "diagnose") {
+              if (!engine!.diagnoseAuthentication) throw new Error("Authentication diagnostics are unavailable.");
+              return {diagnostic:await engine!.diagnoseAuthentication()};
+            }
             if (operation === "login") {
               if (input.accountHash !== owner!.accountHash) throw new AuthError(401);
               const loggedIn = await engine!.login({ signal: controller.signal, timeoutMs: 300_000 });
