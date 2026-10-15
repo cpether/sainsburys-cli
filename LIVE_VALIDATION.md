@@ -1,12 +1,8 @@
 # Supervised live validation
 
-Status on 15 October 2026: the first two approved pilots failed immediate verification and were recovered to an empty basket. Continuing diagnosis reproduced a third removal failure with status-only instrumentation: the write returned HTTP 200, its immediate basket GET returned HTTP 500 JSON, and the next profile read returned HTTP 401. Add, repeated-plan idempotence and quantity update passed during that same run. The website confirmed removal. Fresh API confirmation of that third restoration remains pending until authentication is recovered.
+Status on 15 October 2026: early HTTP pilots and the first resident-browser pilots reproduced successful last-item removal followed by HTTP 500 on basket readback and later authentication rejection. The original empty basket was restored and verified through fresh API reads and the website. No purchase, amendment or slot change occurred.
 
-A resident-browser implementation is now under test. It keeps one dedicated headed Chromium process alive and minimized, with explicit manual login, browser-backed API requests and bounded read-only recovery. This preserves the existing API modules and plan authorization. Live acceptance of that implementation is still pending; automated tests alone do not establish reliability.
-
-The implementation at `37db058` passed 259 automated tests, typecheck, build and all Node 22/24 Linux/macOS CI jobs, with zero dependency audit findings. Claude CLI Opus 5.5 high reran its independent probes and found no material blocker for the supervised pilot. An explicit resident login then reached its five-minute deadline without verified authentication. Safe service status confirmed that the same browser was still running and required login. No resident-transport basket mutation was attempted. This timeout alone does not establish why sign-in was incomplete or whether the transport will work live.
-
-The next action requires the account holder: run `node dist/cli/index.js auth login` from this checkout, complete any sign-in/MFA in the dedicated Chromium window, and wait for verified success. The existing account email is inferred from the private cache. The browser then minimizes and remains running. Continue the already approved bounded pilot below, starting with a fresh empty-basket check. Ordinary commands do not open sign-in windows automatically.
+The account holder completed one sign-in for the resident-browser validation below. Subsequent minimized profile resumes required no additional human sign-in. A bounded diagnostic then verified removal successfully by replacing only the page inside the same browser after basket GET 500, re-verifying identity and repeating the read. The mutation was never repeated. Production regression tests and the full normal-service pilot of that recovery passed. Every mutation was verified, the website matched quantities and totals, and a fresh CLI process confirmed restoration. Longer session lifetime and natural expiry remain unverified.
 
 The earlier generic login failure was followed by a verification failure. Claude independently reproduced an adapter bug with multiple Set-Cookie headers using real Playwright HTTP and a dummy loopback server. The fixed adapter and refreshed-cookie export were followed by successful live login and cached reads. The unslotted reservation also omitted `is_expired`; the parser now accepts that observed form while requiring an explicit expiry flag whenever a slot is present. Synthetic regression fixtures preserve the field layout without account values. No real session, HAR or raw profile response is checked in.
 
@@ -56,6 +52,37 @@ A bounded headless reuse attempt reached a browser challenge and sent no authent
 
 The resident-browser approach keeps the browser process and website JavaScript session alive after one explicit sign-in. The existing request shapes, response validators, target plans and spending/amendment guards remain. A read may renew the website session once after a 401/403; a basket mutation is sent once. Transient post-write verification may repeat one GET. Authentication required by the retailer still needs human participation through explicit `auth login`; ordinary commands leave the window minimized and return a sanitized error rather than opening sign-in.
 
+## Resident-browser validation
+
+An initial explicit login wait expired without verified identity. After the account holder confirmed completed sign-in, the same dedicated browser verified identity in about three seconds without another credential prompt. The first preflight then failed authentication before any write. A minimized restart resumed the saved profile without human participation, and fresh API reads confirmed the earlier empty-basket restoration, account-derived context, no active order and the approved ordinary pot's availability and 65p price.
+
+Two source defects were reproduced with dummy browser fixtures. Recovery discarded complete rotated credential pairs before trying them, and a failed silent refresh permanently blocked later reads even when the retained browser recovered. The fixes verify observed pairs against the expected account before adoption and let a later bound read attempt one silent recovery. Account/generation checks, cancellation and the prohibition on mutation retries remain. Real engine, private IPC and CLI regressions cover these cases. Claude Opus 5.5 high independently reviewed both deltas and found no material blockers. The suite at `4596cfd` passed 267 tests, typecheck and build.
+
+The first normal resident pilot verified quantity one, repeated-plan zero writes and quantity two. The website matched quantity two and £1.30 after a transient page error was refreshed. Removal returned unknown with fixed readback category HTTP 500. A fresh read failed authentication; the website showed empty. A minimized restart, without manual login, enabled fresh API confirmation of the original empty basket, unchanged basket identity and £0 total.
+
+The website used 175 feature flags while the retained static list contained 166. A controlled comparison using the website's current flags reproduced the same final-removal HTTP 500. That difference was not established as the cause, and no speculative feature-flag source change was retained. Quantity one, idempotence and quantity two passed, with website comparisons, before removal. Fresh API and website checks again confirmed restoration after a minimized resume.
+
+A native website removal comparison was inconclusive: the page appeared empty, but no request shape was captured and fresh API reads still showed one pot. That optimistic display was not treated as successful removal. A fresh reviewed one-to-zero CLI plan then exercised a narrowly scoped read-only recovery diagnostic. Its trace showed removal success, basket GET 500, one fresh page in the same minimized browser context, profile verification recovering from 401 to 200, and basket GET 200. The CLI reported one verified change and an empty basket. A separate fresh API process matched the original basket and identity; a website refresh also confirmed empty. The page instrumentation was removed. No passwords, MFA codes, cookies, tokens or raw account responses were emitted or checked in.
+
+This evidence supports replacing the stale page for a basket GET 500, followed by identity verification and one read retry. It does not establish the retailer's internal reason for invalidating the old page's API access, or prove a session-storage cause. The normal-service implementation must preserve the same account and generation, remain within its request deadline, close late pages on cancellation and never repeat the write. The final supervised normal-service pilot below passed with this production recovery.
+
+### Final normal-service pilot
+
+The diagnostic wrapper was stopped. The production implementation started through the normal CLI, resumed the same dedicated private profile without another human sign-in, and passed preflight. The approved SKU `7515858`, ordinary `ea` unit, empty catchweight selection, account-derived context, no booked slot, £1.30 ceiling and two-item maximum were unchanged.
+
+| Step | Production CLI result | Website comparison |
+| --- | --- | --- |
+| Target zero to one | One verified change; quantity one, £0.65 | One pot, £0.65 |
+| Reapply the exact same plan | Already applied; zero writes; quantity one | Not separately reloaded for this read-only result |
+| Target one to two | One verified change; quantity two, £1.30 | Two pots, £1.30 |
+| Target two to zero | One verified change; empty basket, £0 | Empty trolley after refresh |
+| Separate-process restoration read | Whole basket matched original empty snapshot; basket identity unchanged | Empty trolley, test product absent |
+| Fresh identity/context/order/search reads | Expected identity; unchanged context; no active order; 30 search results | No slot/order change was made |
+
+The resident process identity remained unchanged through removal and restoration. Its status remained running and authenticated. No explicit login, browser-process restart or mutation retry occurred during this final sequence. The dedicated browser remains running for subsequent shopping. This establishes the bounded ordinary-item workflow for this account at this time; it does not prove indefinite login, natural expiry, booked-slot pricing or weighted-product compatibility.
+
+Final local checks passed typecheck, build, all 273 automated tests and dependency audit with zero vulnerabilities. The independent fresh-page reviewer separately passed 78 engine/IPC/CLI tests and found no material blocker. Final Claude review and CI are required before merge; their results are recorded on PR6.
+
 ## Login and reads
 
 1. In your own local terminal, build and install the dedicated browser if needed, then run:
@@ -91,7 +118,7 @@ Use the README `basket plan`/`basket apply --approve` commands for every step. A
 
 Run a fresh CLI process to read the identity and basket using the cached session. After API credential expiry, allow one bounded silent renewal through the resident browser. If Sainsbury's requires human authentication, confirm the command returns a sanitized error without showing a login window or repeating a mutation. Run explicit local login only then and verify identity/basket again. A later supervised read on another occasion gives better evidence than immediate reuse alone.
 
-The second and third HTTP-based pilots did not complete clean verification. Resident-browser live acceptance remains pending. Longer session reuse, natural expiry behavior, booked-slot context and weighted/catchweight products remain unverified. Keep the original account state unchanged while those checks are pending.
+The earlier HTTP and resident pilots did not complete clean immediate verification. The final normal-service pilot passed after the fresh-page recovery, including restoration without new sign-in. Longer session reuse, natural expiry behavior, booked-slot context and weighted/catchweight products remain unverified. Keep the original account state unchanged while those checks are pending.
 
 If login cannot establish identity, ordinary browser use works but direct HTTP replay is consistently challenged, or verified basket writes remain unreliable, stop after a bounded pilot. Record sanitized endpoint shapes, response status/content type, the operation and observed website state. Never store token-bearing headers, passwords, MFA codes, cookies, HARs or full account screenshots in the repository. Explain that evidence before replacing authentication or transport. Preserve the useful request shapes and sanitized fixtures.
 

@@ -41,6 +41,7 @@ function fakeBrowser(signedIn: boolean) {
     async goto(url:string){visits.push(url);setUrl(state.signedIn?url:"https://account.sainsburys.co.uk/gol/login");if(state.signedIn&&state.emit)emitPair();},
     async reload(){if(state.signedIn){setUrl("https://www.sainsburys.co.uk/gol-ui/trolley");emitPair();}},
     async bringToFront(){shows++;},
+    async close(){},
     locator:(selector:string)=>({first(){return this;},async isVisible(){
       const fields=[...state.inputs,...(!state.signedIn?[{name:"password",type:"password",autocomplete:""}]:[])];
       return fields.some(field=>selector.split(",").some(part=>{
@@ -195,6 +196,71 @@ describe("resident session recovery and cancellation",()=>{
 });
 
 describe("resident lifecycle regressions",()=>{
+  it("recovers one basket GET500 in a fresh minimized page in the same context with a verified pair and fixed epoch",()=>setup(async(f,e)=>{
+    await e.start({interactive:false,timeoutMs:500});const epoch=e.getSession()!.authGeneration;const original=f.handler;
+    const fresh=fakeBrowser(true);let created=0,oldClosed=0;
+    f.page.close=async()=>{oldClosed++;};f.context.newPage=async()=>{created++;return fresh.page;};
+    let resolveHeaders!:(headers:Record<string,string>)=>void;
+    const delayedHeaders=new Promise<Record<string,string>>(done=>{resolveHeaders=done;});
+    f.context.emit("request",{url:()=>`${ORIGIN}/groceries-api/test`,headers:()=>({}),allHeaders:()=>delayedHeaders,frame:()=>({page:()=>f.page})});
+    fresh.context.on("request",()=>f.context.emit("request",{url:()=>`${ORIGIN}/groceries-api/test`,headers:()=>({wcauthtoken:fakeSession().wcauthtoken,authorization:"Bearer page-refreshed"}),frame:()=>({page:()=>fresh.page})}));
+    const goto=fresh.page.goto.bind(fresh.page);
+    fresh.page.goto=async(url:string)=>{
+      await goto(url);resolveHeaders({wcauthtoken:fakeSession().wcauthtoken,authorization:"Bearer delayed-old-page"});
+      f.context.emit("request",{url:()=>`${ORIGIN}/groceries-api/test`,headers:()=>({wcauthtoken:fakeSession().wcauthtoken,authorization:"Bearer stale-old-page"}),frame:()=>({page:()=>f.page})});
+      await pause(0);
+    };
+    f.handler=async(url,init)=>url===BASKET?new Response('{}',{status:500}):original(url,init);
+    const response=await e.request({url:BASKET,method:"GET",headers:{}});
+    assert.equal(response.status,200);assert.equal(created,1);assert.equal(oldClosed,1);assert.equal(f.launches,1);
+    assert.equal(f.shows+fresh.shows,0);assert.equal(e.getSession()!.authGeneration,epoch);
+    assert.equal(e.getSession()!.bearerToken,"page-refreshed");
+    assert.equal(f.calls.filter(c=>c.url===BASKET).length,1);assert.equal(fresh.calls.filter(c=>c.url===BASKET).length,1);
+  }));
+  it("rejects fresh-page identity mismatch without retrying the basket read",()=>setup(async(f,e)=>{
+    await e.start({interactive:false,timeoutMs:500});const original=f.handler;const fresh=fakeBrowser(true);
+    f.page.close=async()=>{};f.context.newPage=async()=>fresh.page;
+    fresh.state.inputs=[{name:"secret",type:"password"}];
+    fresh.handler=async()=>new Response('{"user_id":"999","email":"other@example.invalid"}',{headers:{"content-type":"application/json"}});
+    f.handler=async(url,init)=>url===BASKET?new Response('{}',{status:500}):original(url,init);
+    await assert.rejects(e.request({url:BASKET,method:"GET",headers:{}}),AuthError);
+    assert.equal(e.getSession(),undefined);assert.equal(fresh.calls.filter(c=>c.url===BASKET).length,0);assert.equal(f.shows+fresh.shows,0);
+  }));
+  it("closes a late fresh page after cancellation without navigation, persistence or retry",()=>setup(async(f,e,dir)=>{
+    await e.start({interactive:false,timeoutMs:500});const original=f.handler;const saved=await loadSession(join(dir,"session.json"));
+    const fresh=fakeBrowser(true);let resolve!: (page:typeof fresh.page)=>void,ready!:()=>void,closed=0;
+    const opening=new Promise<typeof fresh.page>(done=>{resolve=done;});const started=new Promise<void>(done=>{ready=done;});
+    fresh.page.close=async()=>{closed++;};f.context.newPage=()=>{ready();return opening;};
+    f.handler=async(url,init)=>url===BASKET?new Response('{}',{status:500}):original(url,init);
+    const controller=new AbortController();const request=e.request({url:BASKET,method:"GET",headers:{}},controller.signal);
+    await started;controller.abort();await assert.rejects(request,RequestCancelledError);
+    assert.equal(await Promise.race([e.close().then(()=>"closed"),pause(100).then(()=>"blocked")]),"closed");
+    resolve(fresh.page);await pause(5);
+    assert.equal(closed,1);assert.equal(fresh.visits.length,0);assert.equal(fresh.calls.length,0);
+    assert.deepEqual(await loadSession(join(dir,"session.json")),saved);
+  }));
+  it("does not fresh-page recover other GET500s or basket writes",()=>setup(async(f,e)=>{
+    await e.start({interactive:false,timeoutMs:500});const original=f.handler;let created=0;
+    f.context.newPage=async()=>{created++;return f.page;};
+    f.handler=async(url,init)=>url===PRODUCT||init.method==="POST"||init.method==="PUT"?new Response('{}',{status:500}):original(url,init);
+    assert.equal((await e.request({url:PRODUCT,method:"GET",headers:{}})).status,500);
+    assert.equal((await e.request({url:`${BASKET}/item${WRITE_QUERY}`,method:"POST",headers:{},body:JSON.stringify(change)})).status,500);
+    assert.equal((await e.request({url:`${BASKET}${WRITE_QUERY}`,method:"PUT",headers:{},body:JSON.stringify({items:[{...change,item_uid:"line-1"}]})})).status,500);
+    assert.equal(created,0);assert.equal(f.calls.filter(c=>c.init.method==="POST").length,1);assert.equal(f.calls.filter(c=>c.init.method==="PUT").length,1);
+  }));
+  it("returns a second basket GET500 after exactly one fresh-page recovery",()=>setup(async(f,e)=>{
+    await e.start({interactive:false,timeoutMs:500});const original=f.handler;const fresh=fakeBrowser(true);let created=0;
+    f.page.close=async()=>{};f.context.newPage=async()=>{created++;return fresh.page;};
+    f.handler=fresh.handler=async(url,init)=>url===BASKET?new Response('{}',{status:500}):original(url,init);
+    assert.equal((await e.request({url:BASKET,method:"GET",headers:{}})).status,500);
+    assert.equal(created,1);assert.equal(f.calls.filter(c=>c.url===BASKET).length+fresh.calls.filter(c=>c.url===BASKET).length,2);
+  }));
+  it("does not fresh-page recover after a request already used its authentication recovery",()=>setup(async(f,e)=>{
+    await e.start({interactive:false,timeoutMs:500});const original=f.handler;let created=0,reads=0;
+    f.context.newPage=async()=>{created++;return f.page;};
+    f.handler=async(url,init)=>url===BASKET?new Response('{}',{status:++reads===1?401:500}):original(url,init);
+    assert.equal((await e.request({url:BASKET,method:"GET",headers:{}})).status,500);assert.equal(created,0);assert.equal(reads,2);
+  }));
   async function failedRecovery(f:ReturnType<typeof fakeBrowser>,e:ResidentBrowser) {
     await e.start({interactive:false,timeoutMs:500});const original=f.handler;
     f.handler=async(url,init)=>{

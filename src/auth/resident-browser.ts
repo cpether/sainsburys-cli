@@ -42,6 +42,7 @@ export class ResidentBrowser {
   private openingCleanup?: Promise<void>;
   private userAgent?: string;
   private candidates: Pair[] = [];
+  private observationEpoch = 0;
   private wake = new Set<() => void>();
   private authenticated = false;
   private closed = false;
@@ -222,8 +223,12 @@ export class ResidentBrowser {
     let url: URL;
     try { url = new URL(request.url()); } catch { return; }
     if (url.origin !== ORIGIN || !url.pathname.startsWith("/groceries-api/")) return;
+    const epoch = this.observationEpoch;
+    let sourcePage: Page | undefined;
+    try { sourcePage = request.frame().page(); } catch { /* Service-worker requests may have no frame. */ }
+    if (sourcePage && sourcePage !== this.page) return;
     const accept = (headers: Record<string, string>) => {
-      if (this.closed) return;
+      if (this.closed || epoch !== this.observationEpoch || sourcePage && sourcePage !== this.page) return;
       const wc = headers.wcauthtoken, auth = headers.authorization;
       if (!wc || !auth?.toLowerCase().startsWith("bearer ") || !auth.slice(7).trim()) return;
       try { if (this.expectedUser && parseWcauthtoken(wc).userId !== this.expectedUser) return; parseWcauthtoken(wc); } catch { return; }
@@ -259,6 +264,7 @@ export class ResidentBrowser {
   }
 
   private async navigate(signal: AbortSignal): Promise<void> {
+    this.observationEpoch++;
     this.candidates = [];
     if (this.current) this.candidates.push({wc:this.current.wcauthtoken,bearer:this.current.bearerToken});
     await raceAbort(this.page!.goto(`${ORIGIN}/gol-ui/trolley`, {waitUntil:"domcontentloaded",timeout:15_000}).catch(() => {}), signal);
@@ -367,15 +373,51 @@ export class ResidentBrowser {
     check(signal);
   }
 
+  private async recoverBasketPage(signal: AbortSignal): Promise<void> {
+    check(signal);
+    const context = this.context, previous = this.page;
+    if (!context || !previous || !this.current) throw humanRequired();
+    await this.window(false);
+    check(signal);
+    this.authenticated = false;
+    this.observationEpoch++;
+    this.candidates = [];
+    const opening = context.newPage();
+    let page: Page;
+    try { page = await raceAbort(opening,signal); check(signal); }
+    catch (error) {
+      if (signal.aborted) {
+        // Closing the owning context also cancels a pending Chromium newPage.
+        // Keep this cleanup attached for adapters that resolve after cancellation.
+        void opening.then(late => late.close()).catch(() => {});
+      }
+      throw error;
+    }
+    this.page = page;
+    await raceAbort(previous.close(),signal);
+    check(signal);
+    await this.window(false);
+    await this.navigate(signal);
+    await this.authenticate(signal,false,false);
+    check(signal);
+  }
+
   private async readOrRequest(input: ResidentRequest, signal: AbortSignal, allowRecovery = true): Promise<ResidentResponse> {
     const canRecover = allowRecovery && isRead(input);
+    let result: ResidentResponse | undefined;
     try {
-      const result = await this.fetch(input,this.pair!,signal);
-      if (!canRecover || result.status !== 401 && result.status !== 403) return result;
+      result = await this.fetch(input,this.pair!,signal);
     } catch (error) {
       // A navigation between the Node precheck and renderer dispatch sends no
       // request. Treat it as authentication loss, with one silent read recovery.
       if (!canRecover || !(error instanceof AuthError)) throw error;
+    }
+    if (result && (!canRecover || result.status !== 401 && result.status !== 403)) {
+      if (canRecover && this.authenticated && input.method === "GET" && new URL(input.url).pathname === BASKET && result.status === 500) {
+        await this.recoverBasketPage(signal);
+        return this.fetch(input,this.pair!,signal);
+      }
+      return result;
     }
     await this.recoverRead(signal);
     return this.fetch(input,this.pair!,signal);
