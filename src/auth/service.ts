@@ -9,6 +9,11 @@ import { registerCleanup } from "./lifecycle.js";
 import { ApiError, AuthError, RequestCancelledError, RequestTimeoutError, ResponseValidationError } from "../client/http.js";
 import { RESIDENT_INPUT_LIMIT, RESIDENT_OUTPUT_LIMIT, prepareResidentDirectory, readResidentOwner, residentAccountHash, residentServicePaths, type ResidentOwner } from "../client/resident-service.js";
 import { ResidentBrowser } from "./resident-browser.js";
+import { keychainPassword } from "./keychain.js";
+
+/** Frequent enough to stay inside the roughly twenty-minute rejections observed live. */
+export const HEARTBEAT_MS = 5 * 60_000;
+const HEARTBEAT_BUDGET_MS = 55_000;
 
 export interface ResidentEngine {
   start(options: { interactive: boolean; signal?: AbortSignal; timeoutMs?: number }): Promise<void>;
@@ -18,6 +23,7 @@ export interface ResidentEngine {
   getSessionBinding?(): { userId: string; authGeneration?: string } | undefined;
   status(): { authenticated: boolean; needsLogin: boolean };
   diagnoseAuthentication?(): Promise<import("./resident-browser.js").AuthenticationDiagnostic>;
+  heartbeat?(signal: AbortSignal): Promise<boolean>;
   close(): Promise<void>;
 }
 export type ResidentEngineFactory = (options: { config: Config; session?: Session }) => ResidentEngine;
@@ -36,7 +42,7 @@ function record(value: unknown): Record<string, unknown> {
 }
 
 /** The promise resolves only after browser closure, socket cleanup and profile-lock release. */
-export async function runResidentService(config: Config, engineFactory: ResidentEngineFactory = options => new ResidentBrowser(options)): Promise<void> {
+export async function runResidentService(config: Config, engineFactory: ResidentEngineFactory = options => new ResidentBrowser({...options, password: keychainPassword}), heartbeatMs = HEARTBEAT_MS): Promise<void> {
   config = { ...config, sessionPath: resolve(config.sessionPath) };
   const paths = residentServicePaths(config.sessionPath);
   await prepareResidentDirectory(paths);
@@ -53,8 +59,12 @@ export async function runResidentService(config: Config, engineFactory: Resident
   let shutdown: Promise<void> | undefined;
   let shutdownFailed = false;
   const server = createServer({ allowHalfOpen: true });
+  let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
+  let heartbeat: Promise<unknown> = Promise.resolve();
+  let heartbeatRunning = false;
   const stop = () => shutdown ??= (async () => {
     stopping = true;
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
     if (server.listening) server.close();
     for (const controller of controllers) controller.abort();
     for (const socket of sockets) if (!stopWaiters.includes(socket)) socket.destroy();
@@ -62,7 +72,7 @@ export async function runResidentService(config: Config, engineFactory: Resident
       try { await engine?.close(); } catch { shutdownFailed = true; }
       // Even a close error must not release the profile while accepted work is
       // still alive. A failed stop remains bounded at the caller and fails closed.
-      await initial.catch(() => {}); await queue.catch(() => {});
+      await initial.catch(() => {}); await queue.catch(() => {}); await heartbeat.catch(() => {});
       if (shutdownFailed) throw new Error("Resident browser cleanup failed.");
     } finally { finishLifetime(); }
   })();
@@ -193,7 +203,21 @@ export async function runResidentService(config: Config, engineFactory: Resident
       try {
         if (session?.accountEmail && session.accountEmail.toLowerCase() === email) {
           const controller = new AbortController(); controllers.add(controller);
-          initial = engine.start({ interactive: false, signal: controller.signal, timeoutMs: 20_000 }).catch(() => {}).finally(() => { controllers.delete(controller); });
+          // Long enough for one automatic sign-in when the saved session has lapsed.
+          initial = engine.start({ interactive: false, signal: controller.signal, timeoutMs: 45_000 }).catch(() => {}).finally(() => { controllers.delete(controller); });
+        }
+        if (engine.heartbeat) {
+          heartbeatTimer = setInterval(() => {
+            if (stopping || heartbeatRunning) return;
+            heartbeatRunning = true;
+            const controller = new AbortController(); controllers.add(controller);
+            const timer = setTimeout(() => controller.abort(), HEARTBEAT_BUDGET_MS);
+            heartbeat = (async () => {
+              await initial.catch(() => {});
+              if (!stopping) await engine!.heartbeat!(controller.signal);
+            })().catch(() => {}).finally(() => { clearTimeout(timer); controllers.delete(controller); heartbeatRunning = false; });
+          }, heartbeatMs);
+          heartbeatTimer.unref();
         }
         await lifetime;
         await shutdown;

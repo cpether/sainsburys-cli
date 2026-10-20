@@ -17,7 +17,7 @@ program
     [
       "Agent-friendly CLI for Sainsbury's Groceries Online.",
       "",
-      "Auth: run `sainsburys auth login` once. Login and MFA are manual. Expiry requires another local login.",
+      "Auth: run `sainsburys auth login` once. A heartbeat keeps the session active. Optional `auth auto-sign-in enable` re-enters the password from the macOS Keychain; SMS codes still need auth login.",
       "Output: pass --json on any command for structured output. Default is human-readable.",
       "Stores: --store overrides the store number; otherwise derived from the account reservation.",
       "",

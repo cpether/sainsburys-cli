@@ -20,6 +20,17 @@ export function browserDataDir(sessionPath: string, accountEmail = "unidentified
   return join(profileRoot(sessionPath), account);
 }
 
+/**
+ * Chromium throttles timers in minimized windows, which can stop the retailer's
+ * own session renewal while the resident browser waits between commands.
+ */
+export const RESIDENT_ARGS = [
+  "--start-minimized",
+  "--disable-background-timer-throttling",
+  "--disable-backgrounding-occluded-windows",
+  "--disable-renderer-backgrounding",
+];
+
 /** Dedicated Playwright Chromium profile. Never uses the user's ordinary browser profile. */
 export async function launchContext(opts: LaunchOptions): Promise<BrowserContext> {
   let temporary: string | undefined;
@@ -56,7 +67,7 @@ export async function launchContext(opts: LaunchOptions): Promise<BrowserContext
       return chromium.launchPersistentContext(userDataDir, {
         headless: opts.headless,
         timeout: 15_000,
-        ...(opts.minimized ? {args:["--start-minimized"]} : {}),
+        ...(opts.minimized ? {args:RESIDENT_ARGS} : {}),
         // Our lifecycle handler closes the browser before releasing its profile lock.
         handleSIGINT: false,
         handleSIGTERM: false,

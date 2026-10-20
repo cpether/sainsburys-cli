@@ -13,7 +13,7 @@ import { AuthError } from '../src/client/http.js';
 
 async function invoke(home: string, path: string, args: string[], expectedExit = 0) {
   const child = spawn(process.execPath, ['--import', 'tsx', resolve('src/cli/index.ts'), '--json', ...args], {
-    env: { PATH: process.env.PATH, HOME: home, SAINSBURYS_SESSION_PATH: path, SAINSBURYS_EMAIL: 'dummy@example.invalid' },
+    env: { PATH: process.env.PATH, HOME: home, SAINSBURYS_SESSION_PATH: path, SAINSBURYS_EMAIL: 'dummy@example.invalid', SAINSBURYS_AUTO_SIGN_IN: 'off' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let stdout = '', stderr = '';
@@ -67,7 +67,9 @@ test('real CLI reuses one resident service across plans, readback and logout wit
     for (let i = 0; i < 100 && !ready; i++) { ready = (await residentStatus(path)).running; if (!ready) await new Promise(done => setTimeout(done, 20)); }
     assert.ok(ready, 'Dummy resident service became available');
     assert.equal((await invoke(home, path, ['basket', 'show'])).items.length, 0);
-    assert.deepEqual(await invoke(home, path, ['auth', 'diagnose']),{authenticated:true,page:'retailer',passwordFieldVisible:false,mfaFieldVisible:false,credentialPairsObserved:1,storedCredentialsAvailable:true});
+    assert.deepEqual(await invoke(home, path, ['auth', 'diagnose']),{authenticated:true,page:'retailer',passwordFieldVisible:false,mfaFieldVisible:false,credentialPairsObserved:1,storedCredentialsAvailable:true,
+      // An older engine omits later fields; the client reports safe defaults.
+      usernameFieldVisible:null,namedPasswordFieldVisible:null,autoSignIn:'unavailable',lastVerifiedAt:null,lastHeartbeatAt:null,lastHeartbeatOk:null,recentEvents:[]});
     assert.equal((await invoke(home, path, ['order', 'list', '--page-size', '5'])).orders[0].order_uid, '123');
     assert.deepEqual((await invoke(home, path, ['order', 'get', '123'])).order_items, []);
     assert.equal((await invoke(home, path, ['order', 'get', '123/amend'], 1)).ok, false);

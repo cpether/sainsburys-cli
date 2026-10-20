@@ -3,7 +3,7 @@ import { join, resolve } from "node:path";
 
 export interface Config {
   email: string;
-  /** Legacy compatibility only. Login never reads or fills a retained password. */
+  /** Legacy compatibility only. Ignored; automatic sign-in reads only the macOS Keychain. */
   password?: string;
   sessionPath: string;
   storeNumber?: string;

@@ -16,9 +16,28 @@ export SAINSBURYS_EMAIL='you@example.com'
 node dist/cli/index.js auth login
 ```
 
-The first persistent login opens a dedicated Playwright Chromium window. Complete sign-in and MFA yourself. After verifying the account email and user ID, the browser minimizes and stays running. Later CLI processes use that same browser for API requests and session renewal. They do not open sign-in windows or ask for passwords. The CLI ignores `SAINSBURYS_PASSWORD`. No ordinary Chrome profile is used; the downloaded Chromium is the runtime the application actually launches.
+The first persistent login opens a dedicated Playwright Chromium window. Complete sign-in and MFA yourself. After verifying the account email and user ID, the browser minimizes and stays running. Later CLI processes use that same browser for API requests and session renewal. They do not open sign-in windows or ask for passwords. The CLI ignores `SAINSBURYS_PASSWORD`.
 
-Keep this dedicated browser running while shopping. It owns the account profile and a private local socket. `auth stop` closes it while retaining the cached session; a later command attempts to resume the account in a minimized browser. `auth logout` stops it and removes local authentication state. Closing or restarting the browser may require sign-in if Sainsbury's no longer accepts the saved state. Fresh MFA can only be completed by you through explicit `auth login`; normal commands return an authentication error instead of showing a login window.
+The resident service reads your profile every five minutes to keep the session active, and Chromium runs without its usual background throttling so the website's own renewal keeps working while minimized. Each verification, rejection, heartbeat and sign-in event is appended, as a fixed category and timestamp only, to `session.json.auth-events.jsonl`; `auth diagnose` shows the latest entries. Use it to see how long sessions actually last.
+
+### Optional automatic sign-in (macOS)
+
+```sh
+node dist/cli/index.js auth auto-sign-in enable    # macOS security prompts for the password
+node dist/cli/index.js auth auto-sign-in status
+node dist/cli/index.js auth auto-sign-in disable
+```
+
+When enabled, the resident browser fills Sainsbury's sign-in form itself if the session lapses, then verifies the account identity as usual. The password is stored only in your login Keychain under the service `sainsburys-cli`. It is read when the form appears and is never written to a file, environment variable, command argument or output. Safeguards:
+
+- The form must be on `https://account.sainsburys.co.uk/gol/login` and stay visible for a second. An email field showing a different account is refused.
+- It makes at most one submission per operation and one every two minutes. If a submission does not produce verified identity, or Sainsbury's asks for an SMS code, automatic sign-in is blocked until you run `auth login`. A changed password therefore cannot be retried into an account lockout.
+- SMS codes are never automated. If one is requested, normal commands return an authentication error and you run `auth login`.
+- Basket writes are never resent after a sign-in.
+
+Any process running as your macOS user can ask the Keychain for this item, just as it could read the cached session. `auth logout` also removes the Keychain item. `SAINSBURYS_AUTO_SIGN_IN=off` disables every Keychain access. No ordinary Chrome profile is used; the downloaded Chromium is the runtime the application actually launches.
+
+Keep this dedicated browser running while shopping. It owns the account profile and a private local socket. `auth stop` closes it while retaining the cached session; a later command attempts to resume the account in a minimized browser. `auth logout` stops it and removes local authentication state. Closing or restarting the browser may require sign-in if Sainsbury's no longer accepts the saved state. Without automatic sign-in, a fresh password or MFA prompt can only be completed by you through explicit `auth login`; normal commands return an authentication error instead of showing a login window.
 
 If verification is still waiting after sign-in, open Trolley in that same dedicated browser. Keep credentials and MFA codes in the browser. The CLI reports only sanitized errors and never exports HARs or raw browser diagnostics. The browser can renew an accepted website session; this does not guarantee that Sainsbury's will never require MFA again.
 
