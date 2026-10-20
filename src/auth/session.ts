@@ -2,6 +2,7 @@ import { mkdir, readFile, unlink, lstat, open, rename, rm, readdir, rmdir } from
 import { dirname, basename, join, resolve } from "node:path";
 import { tmpdir, homedir } from "node:os";
 import { registerCleanup, throwIfInterrupted } from "./lifecycle.js";
+import { clearAuthEvents } from "./events.js";
 import { createHash, randomUUID } from "node:crypto";
 
 export interface SessionCookie {
@@ -286,6 +287,7 @@ export async function clearSession(path: string): Promise<void> {
       }
     }, "interrupted session files could not be removed");
     await attempt(() => clearAbandonedTemporaryProfiles(path), "temporary profile cleanup is incomplete");
+    await attempt(() => clearAuthEvents(path), "authentication timeline could not be removed");
     if (knownLegacyDirectory) await attempt(() => rm(legacy, {recursive:true,force:true}), "legacy profile could not be removed");
     if (remaining.length) throw new Error(`Logout is incomplete: ${remaining.join("; ")}. Run logout again after resolving the remaining state.`);
   }));

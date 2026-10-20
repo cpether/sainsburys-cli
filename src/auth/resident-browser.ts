@@ -8,8 +8,14 @@ import { parseProfile } from "../api/customer.js";
 import { normalizeIdentifier, validateQuantity } from "../api/basket.js";
 import { parseOrderStatus } from "../api/order.js";
 import { ApiError, AuthError, RequestCancelledError, RequestTimeoutError, ResponseValidationError } from "../client/http.js";
+import { appendAuthEvent, type AuthEventName } from "./events.js";
+import type { PasswordSource } from "./keychain.js";
 
-export interface ResidentBrowserOptions { config: Config; session?: Session; launch?: typeof launchContext }
+export interface ResidentBrowserOptions {
+  config: Config; session?: Session; launch?: typeof launchContext;
+  /** Opt-in automatic sign-in. Without it, a settled sign-in form always requires explicit local login. */
+  password?: PasswordSource;
+}
 export interface ResidentRequest { url: string; method: string; headers: Record<string, string>; body?: string }
 export interface ResidentResponse { status: number; headers: Record<string, string>; body: string }
 export interface AuthenticationDiagnostic {
@@ -17,8 +23,15 @@ export interface AuthenticationDiagnostic {
   page: "retailer" | "account_sign_in" | "account_other" | "other" | "absent";
   passwordFieldVisible: boolean;
   mfaFieldVisible: boolean;
+  /** Whether the fields automatic sign-in fills are present, never their values. */
+  usernameFieldVisible: boolean;
+  namedPasswordFieldVisible: boolean;
   credentialPairsObserved: number;
   storedCredentialsAvailable: boolean;
+  autoSignIn: "unavailable" | "available" | "blocked";
+  lastVerifiedAt: string | null;
+  lastHeartbeatAt: string | null;
+  lastHeartbeatOk: boolean | null;
 }
 type Pair = { wc: string; bearer: string };
 type RendererReply = ResidentResponse | { error: "origin" | "redirect" | "size" | "cancelled" | "deadline" | "network" };
@@ -28,7 +41,12 @@ const BASKET = "/groceries-api/gol-services/basket/v2/basket";
 const ORDER_STATUS = "/groceries-api/gol-services/order/v1/order/status";
 const ORDER_HISTORY = "/groceries-api/gol-services/order/v1/order";
 const SLOT_LIST = "/groceries-api/gol-services/slot/v2/slots";
+const ACCOUNT_ORIGIN = "https://account.sainsburys.co.uk";
 const SIGN_IN_SETTLE_MS = 1_000;
+/** Lets the sign-in page compute its device fingerprint before submission. */
+const SIGN_IN_SUBMIT_DELAY_MS = 500;
+const SIGN_IN_LEAVE_MS = 20_000;
+const AUTO_SIGN_IN_INTERVAL_MS = 120_000;
 const READ_PATHS = new Set([PROFILE, BASKET, ORDER_STATUS,
   "/groceries-api/gol-services/slot/v1/slot/reservation",
   "/groceries-api/gol-services/product/v1/product",
@@ -36,6 +54,7 @@ const READ_PATHS = new Set([PROFILE, BASKET, ORDER_STATUS,
   "/groceries-api/gol-services/coupon/v1/coupon",
 ]);
 const humanRequired = () => new AuthError(401, "The resident browser needs local login or MFA. Run sainsburys auth login; no basket write was retried.");
+const mfaRequired = () => new AuthError(401, "Sainsbury's requested an SMS code after automatic sign-in. Run sainsburys auth login to enter it; no basket write was retried.");
 const check = (signal: AbortSignal) => { if (signal.aborted) throw new RequestCancelledError(); };
 
 /** One headed, minimized browser retains the retailer's live JavaScript session. Runtime owns its profile lock. */
@@ -59,10 +78,20 @@ export class ResidentBrowser {
   private closing?: Promise<void>;
   private queue: Promise<unknown> = Promise.resolve();
   private controllers = new Set<AbortController>();
+  private readonly password?: PasswordSource;
+  // One unverified automatic submission stops further attempts until explicit
+  // login, so a changed password cannot be retried into an account lockout.
+  private autoSignInBlocked = false;
+  private autoSignInUnconfirmed = false;
+  private lastAutoSignInAt?: number;
+  private lastVerifiedAt?: number;
+  private lastHeartbeat?: { at: number; ok: boolean };
+  private events: Promise<void> = Promise.resolve();
 
   constructor(opts: ResidentBrowserOptions) {
     this.config = opts.config;
     this.launch = opts.launch ?? launchContext;
+    this.password = opts.password;
     this.current = opts.session;
     this.expectedEmail = (opts.config.email || opts.session?.accountEmail || "").trim().toLowerCase();
     this.expectedUser = opts.session?.userId;
@@ -88,11 +117,29 @@ export class ResidentBrowser {
       } catch { category = "other"; }
     }
     const visible = async (selector: string) => page ? page.locator(selector).first().isVisible().catch(() => false) : false;
-    const [passwordFieldVisible, mfaFieldVisible] = await Promise.all([
+    const [passwordFieldVisible, mfaFieldVisible, usernameFieldVisible, namedPasswordFieldVisible] = await Promise.all([
       visible('input[type="password"]'), visible('input[autocomplete="one-time-code"]'),
+      visible('input[name="username"]'), visible('input[name="password"]'),
     ]);
-    return {authenticated:this.authenticated,page:category,passwordFieldVisible,mfaFieldVisible,
-      credentialPairsObserved:this.candidates.length,storedCredentialsAvailable:!!this.current};
+    const iso = (at?: number) => at === undefined ? null : new Date(at).toISOString();
+    return {authenticated:this.authenticated,page:category,passwordFieldVisible,mfaFieldVisible,usernameFieldVisible,namedPasswordFieldVisible,
+      credentialPairsObserved:this.candidates.length,storedCredentialsAvailable:!!this.current,
+      autoSignIn:!this.password ? "unavailable" : this.autoSignInBlocked ? "blocked" : "available",
+      lastVerifiedAt:iso(this.lastVerifiedAt),lastHeartbeatAt:iso(this.lastHeartbeat?.at),lastHeartbeatOk:this.lastHeartbeat?.ok ?? null};
+  }
+
+  /** A cheap verified identity read keeps the retailer session active between commands. */
+  async heartbeat(signal?: AbortSignal): Promise<boolean> {
+    if (this.closed || !this.context || !this.current) return false;
+    let ok = false;
+    try {
+      const response = await this.request({url:`${ORIGIN}${PROFILE}`,method:"GET",headers:{}},signal);
+      if (this.pair) { this.verifyIdentityResponse(response,this.pair); ok = true; }
+    } catch { /* Recorded below; the next command reports any required login. */ }
+    if (this.closed) return false;
+    this.lastHeartbeat = {at:Date.now(),ok};
+    this.note(ok ? "heartbeat_ok" : "heartbeat_failed");
+    return ok;
   }
 
   async start(opts: { interactive: boolean; signal?: AbortSignal; timeoutMs?: number }): Promise<void> {
@@ -109,6 +156,8 @@ export class ResidentBrowser {
 
   async login(opts: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<Session> {
     return this.budget(opts.signal, opts.timeoutMs ?? 300_000, signal => this.enqueue(signal, async () => {
+      // Explicit login is the human acknowledgement that re-arms automatic sign-in.
+      this.autoSignInBlocked = false; this.autoSignInUnconfirmed = false;
       await this.open(true, signal);
       await this.window(true);
       try {
@@ -152,6 +201,7 @@ export class ResidentBrowser {
     for (const wake of this.wake) wake();
     this.closing = (async () => {
       await this.queue.catch(() => {});
+      await this.events;
       await this.openingCleanup?.catch(() => {});
       const context = this.context ?? await this.opening?.catch(() => undefined);
       try {
@@ -306,6 +356,7 @@ export class ResidentBrowser {
     let cookieState = "";
     let retailerState: boolean | undefined;
     let signInSince: number | undefined;
+    let signedIn = false;
     for (;;) {
       check(signal);
       // Browser challenges and OAuth redirects can reuse both captured tokens.
@@ -332,10 +383,86 @@ export class ResidentBrowser {
       // operation deadline. Never submit credentials or restart navigation here.
       if (!interactive && await this.humanForm()) {
         signInSince ??= Date.now();
-        if (Date.now() - signInSince >= SIGN_IN_SETTLE_MS) throw humanRequired();
+        if (Date.now() - signInSince >= SIGN_IN_SETTLE_MS) {
+          this.note("sign_in_form");
+          // At most one automatic submission per operation, only after the form settled.
+          if (!signedIn && await this.autoSignIn(signal)) { signedIn = true; signInSince = undefined; continue; }
+          throw humanRequired();
+        }
       } else signInSince = undefined;
       await this.wait(signal);
     }
+  }
+
+  private accountPath(): string | undefined {
+    try {
+      const url = new URL(this.page!.url());
+      return url.origin === ACCOUNT_ORIGIN ? url.pathname : undefined;
+    } catch { return undefined; }
+  }
+  private async mfaPrompt(): Promise<boolean> {
+    const path = this.accountPath();
+    if (path === undefined) return false;
+    if (path.startsWith("/gol/login/mfa")) return true;
+    return this.page!.locator('input[autocomplete="one-time-code"]').first().isVisible().catch(() => false);
+  }
+  /** Live sign-in forms are not always under /gol/login; the account origin is the boundary. */
+  private passwordPrompt(): boolean {
+    const path = this.accountPath();
+    return path !== undefined && !path.startsWith("/gol/login/mfa");
+  }
+
+  /**
+   * Fills Sainsbury's own sign-in form for the configured account only. Returns
+   * false when automatic sign-in is unavailable, so the caller requires explicit
+   * login. Identity is verified afterwards exactly as for a resumed session.
+   */
+  private async autoSignIn(signal: AbortSignal): Promise<boolean> {
+    if (!this.password || this.autoSignInBlocked || !this.page || this.closed) return false;
+    if (this.autoSignInUnconfirmed) { this.autoSignInBlocked = true; return false; }
+    if (this.lastAutoSignInAt !== undefined && Date.now() - this.lastAutoSignInAt < AUTO_SIGN_IN_INTERVAL_MS) return false;
+    const page = this.page;
+    if (!this.passwordPrompt() || await this.mfaPrompt()) return false;
+    const passwordField = page.locator('input[name="password"]').first();
+    const emailField = page.locator('input[name="username"]').first();
+    if (!await passwordField.isVisible().catch(() => false)) return false;
+    const password = await raceAbort(this.password(this.expectedEmail, signal), signal);
+    if (!password) return false;
+    check(signal);
+    if (page !== this.page || !this.passwordPrompt()) return false;
+    this.lastAutoSignInAt = Date.now();
+    const fail = () => { this.autoSignInBlocked = true; this.note("auto_sign_in_failed"); return humanRequired(); };
+    try {
+      if (await emailField.isVisible().catch(() => false)) {
+        const shown = (await raceAbort(emailField.inputValue(), signal)).trim().toLowerCase();
+        if (shown && shown !== this.expectedEmail) throw fail();
+        if (!shown) await raceAbort(emailField.fill(this.expectedEmail), signal);
+      }
+      await raceAbort(passwordField.fill(password), signal);
+      await raceAbort(new Promise(done => setTimeout(done, SIGN_IN_SUBMIT_DELAY_MS)), signal);
+      if (page !== this.page || !this.passwordPrompt()) return false;
+      this.autoSignInUnconfirmed = true;
+      await raceAbort(passwordField.press("Enter"), signal);
+    } catch (error) {
+      if (signal.aborted || error instanceof AuthError) throw error;
+      throw fail();
+    }
+    this.note("auto_sign_in_submitted");
+    const deadline = Date.now() + SIGN_IN_LEAVE_MS;
+    for (;;) {
+      check(signal);
+      if (page !== this.page) throw humanRequired();
+      if (await this.mfaPrompt()) { this.autoSignInBlocked = true; this.note("mfa_required"); throw mfaRequired(); }
+      if (!this.passwordPrompt()) break;
+      if (Date.now() >= deadline) throw fail();
+      await this.wait(signal);
+    }
+    if (!this.retailerPage()) await this.navigate(signal);
+    return true;
+  }
+
+  private note(event: AuthEventName): void {
+    this.events = this.events.then(() => appendAuthEvent(this.config.sessionPath, event)).catch(() => {});
   }
 
   private async humanForm(): Promise<boolean> {
@@ -376,6 +503,8 @@ export class ResidentBrowser {
     await saveSession(this.config.sessionPath,session,signal);
     check(signal);
     this.current = session; this.pair = candidate; this.authenticated = true;
+    this.autoSignInUnconfirmed = false; this.lastVerifiedAt = Date.now();
+    this.note("verified");
   }
 
   private verifyIdentityResponse(response:ResidentResponse,pair:Pair):string {
@@ -450,6 +579,7 @@ export class ResidentBrowser {
       // request. Treat it as authentication loss, with one silent read recovery.
       if (!canRecover || !(error instanceof AuthError)) throw error;
     }
+    if (result && (result.status === 401 || result.status === 403)) this.note("rejected");
     if (result && (!canRecover || result.status !== 401 && result.status !== 403)) {
       if (canRecover && this.authenticated && input.method === "GET" && new URL(input.url).pathname === BASKET && result.status === 500) {
         await this.recoverBasketPage(signal);

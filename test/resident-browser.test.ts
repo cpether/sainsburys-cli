@@ -11,13 +11,15 @@ import { chromium, type BrowserContext } from "playwright";
 import { ResidentBrowser } from "../src/auth/resident-browser.js";
 import { browserDataDir, launchContext } from "../src/auth/browser.js";
 import { fakeSession } from "./_helpers.js";
+import type { PasswordSource } from "../src/auth/keychain.js";
+import { readAuthEvents } from "../src/auth/events.js";
 
-async function setup(run: (fixture: ReturnType<typeof fakeBrowser>, engine: ResidentBrowser, dir: string) => Promise<void>, signedIn = true, sessionOverrides: Partial<Session> = {}) {
+async function setup(run: (fixture: ReturnType<typeof fakeBrowser>, engine: ResidentBrowser, dir: string) => Promise<void>, signedIn = true, sessionOverrides: Partial<Session> = {}, extra: {password?: PasswordSource} = {}) {
   const dir = await mkdtemp(join(tmpdir(), "sainsburys-resident-test-"));
   const fixture = fakeBrowser(signedIn);
   const config = {email:"dummy@example.invalid",sessionPath:join(dir,"session.json"),headed:true,baseUrl:"https://www.sainsburys.co.uk",loginBaseUrl:"https://account.sainsburys.co.uk"};
   await mkdir(browserDataDir(config.sessionPath,config.email),{recursive:true,mode:0o700});
-  const engine = new ResidentBrowser({config,session:fakeSession({...sessionOverrides,accountEmail:config.email}),launch:fixture.launch});
+  const engine = new ResidentBrowser({config,session:fakeSession({...sessionOverrides,accountEmail:config.email}),launch:fixture.launch,...extra});
   try { await run(fixture,engine,dir); } finally { await engine.close(); await rm(dir,{recursive:true,force:true}); }
 }
 function fakeBrowser(signedIn: boolean) {
@@ -29,7 +31,8 @@ function fakeBrowser(signedIn: boolean) {
     return new Response('{}',{headers:{"content-type":"application/json"}});
   };
   const calls:{url:string;init:RequestInit}[]=[];
-  const state={signedIn,emit:true,inputs:[] as {name:string;type?:string;autocomplete?:string}[]};
+  const state={signedIn,emit:true,inputs:[] as {name:string;type?:string;autocomplete?:string}[],
+    filled:{} as Record<string,string>,prefilled:{} as Record<string,string>,submits:0,onSubmit:()=>{}};
   const visits:string[]=[];const windows:string[]=[];
   const context = new EventEmitter() as EventEmitter & Record<string,any>;
   const vm = createContext({navigator:{userAgent:"DummyBrowser/1"},location:{origin:"null"},AbortController,DOMException,TextDecoder,Uint8Array,Map,setTimeout,clearTimeout,URL,
@@ -42,7 +45,11 @@ function fakeBrowser(signedIn: boolean) {
     async reload(){if(state.signedIn){setUrl("https://www.sainsburys.co.uk/gol-ui/trolley");emitPair();}},
     async bringToFront(){shows++;},
     async close(){},
-    locator:(selector:string)=>({first(){return this;},async isVisible(){
+    locator:(selector:string)=>({first(){return this;},
+      async fill(value:string){state.filled[selector.match(/name="([^"]+)"/)![1]!]=value;},
+      async inputValue(){return state.prefilled[selector.match(/name="([^"]+)"/)![1]!]??"";},
+      async press(key:string){assert.equal(key,"Enter");state.submits++;state.onSubmit();},
+      async isVisible(){
       const fields=[...state.inputs,...(!state.signedIn?[{name:"password",type:"password",autocomplete:""}]:[])];
       return fields.some(field=>selector.split(",").some(part=>{
         const exact=part.match(/\[(name|type|autocomplete)="([^"]+)"\]/);
@@ -423,9 +430,10 @@ describe("resident startup and account ownership",()=>{
   }));
 });
 
-it("launches Chromium with a bounded startup deadline and only the minimize flag",()=>setup(async(_f,_e,dir)=>{
+it("launches Chromium with a bounded startup deadline, minimized and without background throttling",()=>setup(async(_f,_e,dir)=>{
   const launch=mock.method(chromium,"launchPersistentContext",async(_directory:string,opts:Record<string,unknown>)=>{
-    assert.equal(opts.timeout,15_000);assert.deepEqual(opts.args,["--start-minimized"]);assert.equal(opts.headless,false);
+    assert.equal(opts.timeout,15_000);
+    assert.deepEqual(opts.args,["--start-minimized","--disable-background-timer-throttling","--disable-backgrounding-occluded-windows","--disable-renderer-backgrounding"]);assert.equal(opts.headless,false);
     return {close:async()=>{}} as unknown as BrowserContext;
   });
   try {const context=await launchContext({sessionPath:join(dir,"session.json"),accountEmail:"dummy@example.invalid",headless:false,minimized:true});await context.close();}
@@ -560,4 +568,104 @@ describe("resident page navigation and form detection",()=>{
       assert.equal(e.status().needsLogin,true);assert.equal(f.shows,0);
     }));
   }
+});
+
+describe("opt-in automatic sign-in",()=>{
+  const LOGIN="https://account.sainsburys.co.uk/gol/login";
+  const password:PasswordSource=async email=>{assert.equal(email,"dummy@example.invalid");return "dummy-password";};
+  const succeed=(f:ReturnType<typeof fakeBrowser>)=>{f.state.onSubmit=()=>{f.state.signedIn=true;f.state.inputs=[];f.setUrl(`${ORIGIN}/gol-ui/trolley`);f.emitPair();};};
+
+  it("fills a settled sign-in form for the configured account, verifies identity and keeps the epoch",()=>setup(async(f,e,dir)=>{
+    f.state.inputs=[{name:"username",type:"email"}];succeed(f);
+    const epoch=e.getSessionBinding()!.authGeneration;
+    await e.start({interactive:false,timeoutMs:5_000});
+    assert.equal(e.status().authenticated,true);assert.equal(f.state.submits,1);assert.equal(f.shows,0);
+    assert.deepEqual(f.state.filled,{username:"dummy@example.invalid",password:"dummy-password"});
+    assert.equal(e.getSession()!.authGeneration,epoch);
+    await e.close();
+    const events=(await readAuthEvents(join(dir,"session.json"))).map(event=>event.event);
+    assert.deepEqual(events.slice(-3),["sign_in_form","auto_sign_in_submitted","verified"]);
+    const diagnostic=JSON.stringify(await e.diagnoseAuthentication());
+    assert.doesNotMatch(diagnostic+JSON.stringify(events),/dummy-password|dummy@example/);
+  },false,{authGeneration:"00000000-0000-4000-8000-000000000002"},{password}));
+
+  it("never submits without a configured password",()=>setup(async(f,e)=>{
+    await assert.rejects(e.start({interactive:false,timeoutMs:3_000}),/auth login/);
+    assert.equal(f.state.submits,0);assert.deepEqual(f.state.filled,{});
+    assert.equal((await e.diagnoseAuthentication()).autoSignIn,"unavailable");
+  },false));
+
+  it("refuses a form prefilled with another account and blocks further attempts",()=>setup(async(f,e)=>{
+    f.state.inputs=[{name:"username",type:"email"}];f.state.prefilled.username="Other@Example.invalid";succeed(f);
+    await assert.rejects(e.start({interactive:false,timeoutMs:3_000}),AuthError);
+    assert.equal(f.state.submits,0);assert.equal(f.state.filled.password,undefined);
+    assert.equal((await e.diagnoseAuthentication()).autoSignIn,"blocked");
+  },false,{},{password}));
+
+  it("stops at an SMS code prompt after submission, without another submission",()=>setup(async(f,e)=>{
+    f.state.onSubmit=()=>{f.state.inputs=[{name:"code",autocomplete:"one-time-code"}];f.setUrl(`${LOGIN}/mfa`);};
+    await assert.rejects(e.start({interactive:false,timeoutMs:5_000}),/SMS code/);
+    assert.equal((await e.diagnoseAuthentication()).autoSignIn,"blocked");
+    f.setUrl(LOGIN);f.state.inputs=[];
+    await assert.rejects(e.request({url:PRODUCT,method:"GET",headers:{}}),AuthError);
+    assert.equal(f.state.submits,1);assert.equal(f.shows,0);
+  },false,{},{password}));
+
+  it("blocks after one submission that never produced verified identity, until explicit login re-arms it",()=>setup(async(f,e)=>{
+    // The form accepts the submission but every identity read is rejected.
+    f.handler=async()=>new Response('{}',{status:401});
+    f.state.onSubmit=()=>{f.setUrl(`${ORIGIN}/gol-ui/trolley`);};
+    await assert.rejects(e.start({interactive:false,timeoutMs:2_500}));
+    assert.equal(f.state.submits,1);
+    f.setUrl(LOGIN);
+    await assert.rejects(e.start({interactive:false,timeoutMs:3_000}),AuthError);
+    assert.equal(f.state.submits,1);assert.equal((await e.diagnoseAuthentication()).autoSignIn,"blocked");
+    f.handler=async url=>url.endsWith("/customer/profile")?new Response(JSON.stringify({user_id:"123456789",email:"dummy@example.invalid"}),{headers:{"content-type":"application/json"}}):new Response('{}',{headers:{"content-type":"application/json"}});
+    f.state.signedIn=true;
+    await e.login({timeoutMs:2_000});
+    assert.equal((await e.diagnoseAuthentication()).autoSignIn,"available");
+  },false,{},{password}));
+
+  it("fills a settled password form on another account-site path",()=>setup(async(f,e)=>{
+    const goto=f.page.goto.bind(f.page);
+    f.page.goto=async(url:string)=>{await goto(url);if(!f.state.signedIn)f.setUrl("https://account.sainsburys.co.uk/sign-in?challenge=1");};
+    succeed(f);
+    await e.start({interactive:false,timeoutMs:5_000});
+    assert.equal(e.status().authenticated,true);assert.equal(f.state.submits,1);
+  },false,{},{password}));
+
+  it("never fills a password form outside the account site",()=>setup(async(f,e)=>{
+    const goto=f.page.goto.bind(f.page);
+    f.page.goto=async(url:string)=>{await goto(url);f.setUrl("https://evil.example/gol/login");};
+    await assert.rejects(e.start({interactive:false,timeoutMs:3_000}),AuthError);
+    assert.equal(f.state.submits,0);assert.deepEqual(f.state.filled,{});
+  },false,{},{password}));
+
+  it("does not submit on an MFA-only account page",()=>setup(async(f,e)=>{
+    const goto=f.page.goto.bind(f.page);
+    f.page.goto=async(url:string)=>{await goto(url);f.setUrl(`${LOGIN}/mfa`);f.state.inputs=[{name:"code",autocomplete:"one-time-code"}];};
+    await assert.rejects(e.start({interactive:false,timeoutMs:3_000}),AuthError);
+    assert.equal(f.state.submits,0);assert.deepEqual(f.state.filled,{});
+  },false,{},{password}));
+});
+
+describe("resident heartbeat",()=>{
+  it("verifies identity, records the outcome and reports failure without throwing",()=>setup(async(f,e,dir)=>{
+    await e.start({interactive:false,timeoutMs:500});
+    const before=f.calls.length;
+    assert.equal(await e.heartbeat(),true);
+    assert.ok(f.calls.slice(before).every(call=>call.url.endsWith(PROFILE)&&call.init.method==="GET"));
+    let report=await e.diagnoseAuthentication();
+    assert.equal(report.lastHeartbeatOk,true);assert.ok(report.lastVerifiedAt);
+    f.handler=async()=>new Response('{}',{status:401});f.state.emit=false;
+    assert.equal(await e.heartbeat(),false);
+    report=await e.diagnoseAuthentication();
+    assert.equal(report.lastHeartbeatOk,false);assert.equal(f.shows,0);
+    await e.close();
+    const events=(await readAuthEvents(join(dir,"session.json"))).map(event=>event.event);
+    assert.ok(events.includes("heartbeat_ok")&&events.includes("rejected")&&events.at(-1)==="heartbeat_failed");
+  }));
+  it("does nothing before a browser exists",()=>setup(async(f,e)=>{
+    assert.equal(await e.heartbeat(),false);assert.equal(f.launches,0);
+  }));
 });

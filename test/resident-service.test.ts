@@ -40,17 +40,19 @@ class FakeEngine implements ResidentEngine {
   }
   getSession() { return this.active ? this.options.session : undefined; }
   status() { return { authenticated: this.active, needsLogin: !this.active }; }
+  heartbeats = 0;
+  async heartbeat(signal: AbortSignal) { if (signal.aborted) return false; this.heartbeats++; return this.active; }
   async close() { this.closes++; this.active = false; }
 }
 
-async function running<T>(run: (value: {config: Config; session: Session; engine: FakeEngine; path: string; lifetime: Promise<void>}) => Promise<T>, setup?: (engine: FakeEngine) => void, cached = true): Promise<T> {
+async function running<T>(run: (value: {config: Config; session: Session; engine: FakeEngine; path: string; lifetime: Promise<void>}) => Promise<T>, setup?: (engine: FakeEngine) => void, cached = true, heartbeatMs?: number): Promise<T> {
   const home = await mkdtemp(join(tmpdir(), "sainsburys-resident-ipc-test-"));
   const path = join(home, "session.json");
   const cfg = config(path); const session = initial();
   if (cached) await saveSession(path, session);
   let engine!: FakeEngine;
   const factory: ResidentEngineFactory = options => { engine = new FakeEngine(options); setup?.(engine); return engine; };
-  const lifetime = runResidentService(cfg, factory);
+  const lifetime = runResidentService(cfg, factory, heartbeatMs);
   let endedError: unknown;
   void lifetime.catch(error => { endedError = error; });
   try {
@@ -413,3 +415,18 @@ it("logout refuses an unrecognized live socket instead of clearing credentials b
     assert.ok(await loadSession(path));
   } finally { await writeFile(paths.owner, owner, {mode: 0o600}); }
 }));
+
+it("runs a periodic heartbeat after initial resume and stops it with the service", async () => {
+  let observed!: FakeEngine;
+  await running(async ({engine}) => {
+    observed = engine;
+    const deadline = Date.now() + 3000;
+    while (engine.heartbeats < 2 && Date.now() < deadline) await new Promise(done => setTimeout(done, 10));
+    assert.ok(engine.heartbeats >= 2, "heartbeat ran repeatedly");
+    assert.equal(engine.starts, 1);
+    assert.equal(engine.calls.length, 0, "heartbeat stays inside the engine and sends no IPC request");
+  }, undefined, true, 20);
+  const after = observed.heartbeats;
+  await new Promise(done => setTimeout(done, 80));
+  assert.equal(observed.heartbeats, after, "no heartbeat after stop");
+});

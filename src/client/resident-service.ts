@@ -138,8 +138,15 @@ export async function residentAuthenticationDiagnostic(sessionPath: string): Pro
   if (!d || !["retailer","account_sign_in","account_other","other","absent"].includes(String(d.page)) ||
       [d.authenticated,d.passwordFieldVisible,d.mfaFieldVisible,d.storedCredentialsAvailable].some(v=>typeof v!=="boolean") ||
       !Number.isInteger(d.credentialPairsObserved) || Number(d.credentialPairsObserved)<0 || Number(d.credentialPairsObserved)>16) throw new ResidentRpcError("PROTOCOL");
+  // Fields added later are optional so an older resident process still reports its categories.
+  const time = (value: unknown) => typeof value === "string" && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : null;
   return {authenticated:d.authenticated,page:d.page,passwordFieldVisible:d.passwordFieldVisible,
-    mfaFieldVisible:d.mfaFieldVisible,credentialPairsObserved:d.credentialPairsObserved,storedCredentialsAvailable:d.storedCredentialsAvailable};
+    mfaFieldVisible:d.mfaFieldVisible,
+    usernameFieldVisible:typeof d.usernameFieldVisible === "boolean" ? d.usernameFieldVisible : null,
+    namedPasswordFieldVisible:typeof d.namedPasswordFieldVisible === "boolean" ? d.namedPasswordFieldVisible : null,
+    credentialPairsObserved:d.credentialPairsObserved,storedCredentialsAvailable:d.storedCredentialsAvailable,
+    autoSignIn:["unavailable","available","blocked"].includes(String(d.autoSignIn)) ? d.autoSignIn : "unavailable",
+    lastVerifiedAt:time(d.lastVerifiedAt),lastHeartbeatAt:time(d.lastHeartbeatAt),lastHeartbeatOk:typeof d.lastHeartbeatOk === "boolean" ? d.lastHeartbeatOk : null};
 }
 
 export async function ensureResidentService(config: Config, expected?: {userId: string; authGeneration?: string}): Promise<void> {
@@ -166,6 +173,7 @@ export async function ensureResidentService(config: Config, expected?: {userId: 
     for (const key of ["PATH", "HOME", "USERPROFILE", "TMPDIR", "TMP", "TEMP", "DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "LANG", "LC_ALL", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"]) if (process.env[key] !== undefined) env[key] = process.env[key];
     env.SAINSBURYS_SESSION_PATH = resolve(config.sessionPath);
     env.SAINSBURYS_EMAIL = email;
+    if (process.env.SAINSBURYS_AUTO_SIGN_IN !== undefined) env.SAINSBURYS_AUTO_SIGN_IN = process.env.SAINSBURYS_AUTO_SIGN_IN;
     const child = spawn(process.execPath, [...(extension === ".ts" ? ["--import", "tsx"] : []), entry], { cwd: fileURLToPath(new URL("../../", import.meta.url)), env, detached: true, stdio: "ignore" });
     let failed = false;
     child.once("error", () => { failed = true; });
