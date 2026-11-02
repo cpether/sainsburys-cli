@@ -14,7 +14,7 @@ import { fakeSession } from "./_helpers.js";
 import type { PasswordSource } from "../src/auth/keychain.js";
 import { readAuthEvents } from "../src/auth/events.js";
 
-async function setup(run: (fixture: ReturnType<typeof fakeBrowser>, engine: ResidentBrowser, dir: string) => Promise<void>, signedIn = true, sessionOverrides: Partial<Session> = {}, extra: {password?: PasswordSource} = {}) {
+async function setup(run: (fixture: ReturnType<typeof fakeBrowser>, engine: ResidentBrowser, dir: string) => Promise<void>, signedIn = true, sessionOverrides: Partial<Session> = {}, extra: {password?: PasswordSource; notifyLogin?: () => void} = {}) {
   const dir = await mkdtemp(join(tmpdir(), "sainsburys-resident-test-"));
   const fixture = fakeBrowser(signedIn);
   const config = {email:"dummy@example.invalid",sessionPath:join(dir,"session.json"),headed:true,baseUrl:"https://www.sainsburys.co.uk",loginBaseUrl:"https://account.sainsburys.co.uk"};
@@ -600,12 +600,14 @@ describe("opt-in automatic sign-in",()=>{
     await assert.rejects(e.start({interactive:false,timeoutMs:3_000}),AuthError);
     assert.equal(f.state.submits,0);assert.equal(f.state.filled.password,undefined);
     assert.equal((await e.diagnoseAuthentication()).autoSignIn,"blocked");
+    assert.equal((await e.diagnoseAuthentication()).autoSignInBlockReason,"account_mismatch");
   },false,{},{password}));
 
   it("stops at an SMS code prompt after submission, without another submission",()=>setup(async(f,e)=>{
     f.state.onSubmit=()=>{f.state.inputs=[{name:"code",autocomplete:"one-time-code"}];f.setUrl(`${LOGIN}/mfa`);};
     await assert.rejects(e.start({interactive:false,timeoutMs:5_000}),/SMS code/);
     assert.equal((await e.diagnoseAuthentication()).autoSignIn,"blocked");
+    assert.equal((await e.diagnoseAuthentication()).autoSignInBlockReason,"mfa_required");
     f.setUrl(LOGIN);f.state.inputs=[];
     await assert.rejects(e.request({url:PRODUCT,method:"GET",headers:{}}),AuthError);
     assert.equal(f.state.submits,1);assert.equal(f.shows,0);
@@ -620,11 +622,64 @@ describe("opt-in automatic sign-in",()=>{
     f.setUrl(LOGIN);
     await assert.rejects(e.start({interactive:false,timeoutMs:3_000}),AuthError);
     assert.equal(f.state.submits,1);assert.equal((await e.diagnoseAuthentication()).autoSignIn,"blocked");
+    assert.equal((await e.diagnoseAuthentication()).autoSignInBlockReason,"unverified_submission");
     f.handler=async url=>url.endsWith("/customer/profile")?new Response(JSON.stringify({user_id:"123456789",email:"dummy@example.invalid"}),{headers:{"content-type":"application/json"}}):new Response('{}',{headers:{"content-type":"application/json"}});
     f.state.signedIn=true;
     await e.login({timeoutMs:2_000});
     assert.equal((await e.diagnoseAuthentication()).autoSignIn,"available");
   },false,{},{password}));
+
+  // Moves the clock past the two-minute gap between automatic submissions.
+  const later=async(ms:number,run:()=>Promise<void>)=>{
+    const now=Date.now;Date.now=()=>now()+ms;
+    try{await run();}finally{Date.now=now;}
+  };
+  const eventsIn=async(dir:string)=>(await readAuthEvents(join(dir,"session.json"),100)).map(event=>event.event);
+
+  it("retries once after a submission interrupted before its outcome, then verifies",()=>{let notified=0;return setup(async(f,e,dir)=>{
+    // The deadline expires while waiting for the submitted form to leave, as when the Mac sleeps.
+    await assert.rejects(e.start({interactive:false,timeoutMs:2_500}),AuthError);
+    assert.equal(f.state.submits,1);
+    let report=await e.diagnoseAuthentication();
+    assert.equal(report.autoSignIn,"available");assert.equal(report.autoSignInBlockReason,null);
+    succeed(f);
+    await later(130_000,()=>e.start({interactive:false,timeoutMs:5_000}));
+    assert.equal(e.status().authenticated,true);assert.equal(f.state.submits,2);assert.equal(f.shows,0);
+    await e.close();
+    const events=await eventsIn(dir);
+    const from=events.indexOf("auto_sign_in_interrupted");
+    assert.ok(from>=0);
+    assert.deepEqual(events.slice(from).filter(event=>event!=="sign_in_form"),["auto_sign_in_interrupted","auto_sign_in_retry","auto_sign_in_submitted","verified"]);
+    assert.equal(notified,0);
+  },false,{},{password,notifyLogin:()=>{notified++;}});});
+
+  it("blocks after the single retry is also interrupted and notifies once",()=>{let notified=0;return setup(async(f,e,dir)=>{
+    await assert.rejects(e.start({interactive:false,timeoutMs:2_500}),AuthError);
+    await later(130_000,async()=>{await assert.rejects(e.start({interactive:false,timeoutMs:2_500}),AuthError);});
+    assert.equal(f.state.submits,2);
+    await later(260_000,async()=>{
+      await assert.rejects(e.start({interactive:false,timeoutMs:3_000}),AuthError);
+      await assert.rejects(e.start({interactive:false,timeoutMs:3_000}),AuthError);
+    });
+    assert.equal(f.state.submits,2);assert.equal(notified,1);
+    const report=await e.diagnoseAuthentication();
+    assert.equal(report.autoSignIn,"blocked");assert.equal(report.autoSignInBlockReason,"unverified_submission");
+    await e.close();
+    const events=await eventsIn(dir);
+    assert.equal(events.filter(event=>event==="auto_sign_in_blocked").length,1);
+    assert.equal(events.filter(event=>event==="login_needed").length,1);
+  },false,{},{password,notifyLogin:()=>{notified++;}});});
+
+  it("records a missing Keychain password once and notifies once per lapse",()=>{let notified=0;return setup(async(f,e,dir)=>{
+    await assert.rejects(e.start({interactive:false,timeoutMs:3_000}),AuthError);
+    await assert.rejects(e.start({interactive:false,timeoutMs:3_000}),AuthError);
+    assert.equal(f.state.submits,0);assert.equal(notified,1);
+    assert.equal((await e.diagnoseAuthentication()).autoSignInBlockReason,null);
+    await e.close();
+    const events=await eventsIn(dir);
+    assert.equal(events.filter(event=>event==="keychain_unavailable").length,1);
+    assert.equal(events.filter(event=>event==="login_needed").length,1);
+  },false,{},{password:async()=>undefined,notifyLogin:()=>{notified++;}});});
 
   it("fills a settled password form on another account-site path",()=>setup(async(f,e)=>{
     const goto=f.page.goto.bind(f.page);

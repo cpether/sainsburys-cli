@@ -10,12 +10,17 @@ import { parseOrderStatus } from "../api/order.js";
 import { ApiError, AuthError, RequestCancelledError, RequestTimeoutError, ResponseValidationError } from "../client/http.js";
 import { appendAuthEvent, type AuthEventName } from "./events.js";
 import type { PasswordSource } from "./keychain.js";
+import type { LoginNotifier } from "./notify.js";
 
 export interface ResidentBrowserOptions {
   config: Config; session?: Session; launch?: typeof launchContext;
   /** Opt-in automatic sign-in. Without it, a settled sign-in form always requires explicit local login. */
   password?: PasswordSource;
+  /** Called once per lapse when unattended recovery cannot continue without a human. */
+  notifyLogin?: LoginNotifier;
 }
+/** Why automatic sign-in stopped. Fixed categories only. */
+export type AutoSignInBlockReason = "account_mismatch" | "submission_failed" | "unverified_submission" | "mfa_required";
 export interface ResidentRequest { url: string; method: string; headers: Record<string, string>; body?: string }
 export interface ResidentResponse { status: number; headers: Record<string, string>; body: string }
 export interface AuthenticationDiagnostic {
@@ -29,6 +34,7 @@ export interface AuthenticationDiagnostic {
   credentialPairsObserved: number;
   storedCredentialsAvailable: boolean;
   autoSignIn: "unavailable" | "available" | "blocked";
+  autoSignInBlockReason: AutoSignInBlockReason | null;
   lastVerifiedAt: string | null;
   lastHeartbeatAt: string | null;
   lastHeartbeatOk: boolean | null;
@@ -79,10 +85,17 @@ export class ResidentBrowser {
   private queue: Promise<unknown> = Promise.resolve();
   private controllers = new Set<AbortController>();
   private readonly password?: PasswordSource;
+  private readonly notifyLogin?: LoginNotifier;
   // One unverified automatic submission stops further attempts until explicit
-  // login, so a changed password cannot be retried into an account lockout.
-  private autoSignInBlocked = false;
+  // login, so a changed password cannot be retried into an account lockout. A
+  // submission interrupted by cancellation, a deadline or sleep has no observed
+  // outcome; it earns exactly one more attempt per lapse before blocking.
+  private autoSignInBlock?: AutoSignInBlockReason;
   private autoSignInUnconfirmed = false;
+  private autoSignInInterrupted = false;
+  private autoSignInRetryUsed = false;
+  private keychainMissNoted = false;
+  private loginNotified = false;
   private lastAutoSignInAt?: number;
   private lastVerifiedAt?: number;
   private lastHeartbeat?: { at: number; ok: boolean };
@@ -92,6 +105,7 @@ export class ResidentBrowser {
     this.config = opts.config;
     this.launch = opts.launch ?? launchContext;
     this.password = opts.password;
+    this.notifyLogin = opts.notifyLogin;
     this.current = opts.session;
     this.expectedEmail = (opts.config.email || opts.session?.accountEmail || "").trim().toLowerCase();
     this.expectedUser = opts.session?.userId;
@@ -124,7 +138,8 @@ export class ResidentBrowser {
     const iso = (at?: number) => at === undefined ? null : new Date(at).toISOString();
     return {authenticated:this.authenticated,page:category,passwordFieldVisible,mfaFieldVisible,usernameFieldVisible,namedPasswordFieldVisible,
       credentialPairsObserved:this.candidates.length,storedCredentialsAvailable:!!this.current,
-      autoSignIn:!this.password ? "unavailable" : this.autoSignInBlocked ? "blocked" : "available",
+      autoSignIn:!this.password ? "unavailable" : this.autoSignInBlock ? "blocked" : "available",
+      autoSignInBlockReason:this.password ? this.autoSignInBlock ?? null : null,
       lastVerifiedAt:iso(this.lastVerifiedAt),lastHeartbeatAt:iso(this.lastHeartbeat?.at),lastHeartbeatOk:this.lastHeartbeat?.ok ?? null};
   }
 
@@ -157,7 +172,8 @@ export class ResidentBrowser {
   async login(opts: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<Session> {
     return this.budget(opts.signal, opts.timeoutMs ?? 300_000, signal => this.enqueue(signal, async () => {
       // Explicit login is the human acknowledgement that re-arms automatic sign-in.
-      this.autoSignInBlocked = false; this.autoSignInUnconfirmed = false;
+      this.autoSignInBlock = undefined; this.autoSignInUnconfirmed = false;
+      this.autoSignInInterrupted = false; this.autoSignInRetryUsed = false;
       await this.open(true, signal);
       await this.window(true);
       try {
@@ -386,7 +402,9 @@ export class ResidentBrowser {
         if (Date.now() - signInSince >= SIGN_IN_SETTLE_MS) {
           this.note("sign_in_form");
           // At most one automatic submission per operation, only after the form settled.
-          if (!signedIn && await this.autoSignIn(signal)) { signedIn = true; signInSince = undefined; continue; }
+          const outcome = signedIn ? "wait" : await this.autoSignIn(signal);
+          if (outcome === "submitted") { signedIn = true; signInSince = undefined; continue; }
+          if (outcome === "unavailable") this.loginNeeded();
           throw humanRequired();
         }
       } else signInSince = undefined;
@@ -414,51 +432,95 @@ export class ResidentBrowser {
 
   /**
    * Fills Sainsbury's own sign-in form for the configured account only. Returns
-   * false when automatic sign-in is unavailable, so the caller requires explicit
-   * login. Identity is verified afterwards exactly as for a resumed session.
+   * "unavailable" when a human must sign in, "wait" when a later operation may
+   * try again, and "submitted" when identity should now be verified exactly as
+   * for a resumed session.
    */
-  private async autoSignIn(signal: AbortSignal): Promise<boolean> {
-    if (!this.password || this.autoSignInBlocked || !this.page || this.closed) return false;
-    if (this.autoSignInUnconfirmed) { this.autoSignInBlocked = true; return false; }
-    if (this.lastAutoSignInAt !== undefined && Date.now() - this.lastAutoSignInAt < AUTO_SIGN_IN_INTERVAL_MS) return false;
+  private async autoSignIn(signal: AbortSignal): Promise<"submitted" | "wait" | "unavailable"> {
+    if (!this.password || this.autoSignInBlock || !this.page || this.closed) return "unavailable";
+    if (this.autoSignInUnconfirmed && (!this.autoSignInInterrupted || this.autoSignInRetryUsed)) {
+      this.block("unverified_submission"); return "unavailable";
+    }
+    if (this.lastAutoSignInAt !== undefined && Date.now() - this.lastAutoSignInAt < AUTO_SIGN_IN_INTERVAL_MS) return "wait";
+    if (this.autoSignInUnconfirmed) {
+      // The previous submission never reached an outcome. Spend the single retry.
+      this.autoSignInRetryUsed = true; this.autoSignInInterrupted = false; this.autoSignInUnconfirmed = false;
+      this.note("auto_sign_in_retry");
+    }
     const page = this.page;
-    if (!this.passwordPrompt() || await this.mfaPrompt()) return false;
+    if (!this.passwordPrompt() || await this.mfaPrompt()) return "unavailable";
     const passwordField = page.locator('input[name="password"]').first();
     const emailField = page.locator('input[name="username"]').first();
-    if (!await passwordField.isVisible().catch(() => false)) return false;
+    if (!await passwordField.isVisible().catch(() => false)) return "unavailable";
     const password = await raceAbort(this.password(this.expectedEmail, signal), signal);
-    if (!password) return false;
+    if (!password) {
+      // A locked Keychain or missing item. Recorded once per lapse, not on every heartbeat.
+      if (!this.keychainMissNoted) { this.keychainMissNoted = true; this.note("keychain_unavailable"); }
+      return "unavailable";
+    }
     check(signal);
-    if (page !== this.page || !this.passwordPrompt()) return false;
+    if (page !== this.page || !this.passwordPrompt()) return "wait";
     this.lastAutoSignInAt = Date.now();
-    const fail = () => { this.autoSignInBlocked = true; this.note("auto_sign_in_failed"); return humanRequired(); };
+    const fail = (reason: AutoSignInBlockReason) => { this.note("auto_sign_in_failed"); this.block(reason); return humanRequired(); };
     try {
       if (await emailField.isVisible().catch(() => false)) {
         const shown = (await raceAbort(emailField.inputValue(), signal)).trim().toLowerCase();
-        if (shown && shown !== this.expectedEmail) throw fail();
+        if (shown && shown !== this.expectedEmail) throw fail("account_mismatch");
         if (!shown) await raceAbort(emailField.fill(this.expectedEmail), signal);
       }
       await raceAbort(passwordField.fill(password), signal);
       await raceAbort(new Promise(done => setTimeout(done, SIGN_IN_SUBMIT_DELAY_MS)), signal);
-      if (page !== this.page || !this.passwordPrompt()) return false;
+      if (page !== this.page || !this.passwordPrompt()) return "wait";
       this.autoSignInUnconfirmed = true;
       await raceAbort(passwordField.press("Enter"), signal);
     } catch (error) {
-      if (signal.aborted || error instanceof AuthError) throw error;
-      throw fail();
+      if (signal.aborted) { this.interrupted(); throw error; }
+      if (error instanceof AuthError) throw error;
+      throw fail("submission_failed");
     }
     this.note("auto_sign_in_submitted");
     const deadline = Date.now() + SIGN_IN_LEAVE_MS;
-    for (;;) {
-      check(signal);
-      if (page !== this.page) throw humanRequired();
-      if (await this.mfaPrompt()) { this.autoSignInBlocked = true; this.note("mfa_required"); throw mfaRequired(); }
-      if (!this.passwordPrompt()) break;
-      if (Date.now() >= deadline) throw fail();
-      await this.wait(signal);
+    try {
+      for (;;) {
+        check(signal);
+        if (page !== this.page) throw humanRequired();
+        if (await this.mfaPrompt()) {
+          this.note("mfa_required"); this.block("mfa_required");
+          throw mfaRequired();
+        }
+        if (!this.passwordPrompt()) break;
+        // The form is still shown after 20 seconds: Sainsbury's did not accept it.
+        if (Date.now() >= deadline) throw fail("submission_failed");
+        await this.wait(signal);
+      }
+      if (!this.retailerPage()) await this.navigate(signal);
+    } catch (error) {
+      if (signal.aborted) this.interrupted();
+      throw error;
     }
-    if (!this.retailerPage()) await this.navigate(signal);
-    return true;
+    return "submitted";
+  }
+
+  /** A submission whose outcome was never observed, such as when the Mac slept mid-attempt. */
+  private interrupted(): void {
+    if (!this.autoSignInUnconfirmed || this.autoSignInInterrupted) return;
+    this.autoSignInInterrupted = true;
+    this.note("auto_sign_in_interrupted");
+  }
+
+  private block(reason: AutoSignInBlockReason): void {
+    if (this.autoSignInBlock) return;
+    this.autoSignInBlock = reason;
+    this.note("auto_sign_in_blocked");
+    this.loginNeeded();
+  }
+
+  /** At most one notification per lapse; verified identity re-arms it. */
+  private loginNeeded(): void {
+    if (this.loginNotified) return;
+    this.loginNotified = true;
+    this.note("login_needed");
+    try { this.notifyLogin?.(); } catch { /* Notification is best effort. */ }
   }
 
   private note(event: AuthEventName): void {
@@ -503,7 +565,9 @@ export class ResidentBrowser {
     await saveSession(this.config.sessionPath,session,signal);
     check(signal);
     this.current = session; this.pair = candidate; this.authenticated = true;
-    this.autoSignInUnconfirmed = false; this.lastVerifiedAt = Date.now();
+    this.autoSignInUnconfirmed = false; this.autoSignInInterrupted = false; this.autoSignInRetryUsed = false;
+    this.keychainMissNoted = false; this.loginNotified = false;
+    this.lastVerifiedAt = Date.now();
     this.note("verified");
   }
 

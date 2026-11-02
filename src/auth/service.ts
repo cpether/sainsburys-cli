@@ -10,6 +10,7 @@ import { ApiError, AuthError, RequestCancelledError, RequestTimeoutError, Respon
 import { RESIDENT_INPUT_LIMIT, RESIDENT_OUTPUT_LIMIT, prepareResidentDirectory, readResidentOwner, residentAccountHash, residentServicePaths, type ResidentOwner } from "../client/resident-service.js";
 import { ResidentBrowser } from "./resident-browser.js";
 import { keychainPassword } from "./keychain.js";
+import { macLoginNotifier } from "./notify.js";
 
 /** Frequent enough to stay inside the roughly twenty-minute rejections observed live. */
 export const HEARTBEAT_MS = 5 * 60_000;
@@ -42,7 +43,7 @@ function record(value: unknown): Record<string, unknown> {
 }
 
 /** The promise resolves only after browser closure, socket cleanup and profile-lock release. */
-export async function runResidentService(config: Config, engineFactory: ResidentEngineFactory = options => new ResidentBrowser({...options, password: keychainPassword}), heartbeatMs = HEARTBEAT_MS): Promise<void> {
+export async function runResidentService(config: Config, engineFactory: ResidentEngineFactory = options => new ResidentBrowser({...options, password: keychainPassword, notifyLogin: macLoginNotifier}), heartbeatMs = HEARTBEAT_MS): Promise<void> {
   config = { ...config, sessionPath: resolve(config.sessionPath) };
   const paths = residentServicePaths(config.sessionPath);
   await prepareResidentDirectory(paths);

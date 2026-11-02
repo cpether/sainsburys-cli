@@ -32,6 +32,9 @@ When enabled, the resident browser fills Sainsbury's sign-in form itself if the 
 
 - The form must be on `https://account.sainsburys.co.uk/gol/login` and stay visible for a second. An email field showing a different account is refused.
 - It makes at most one submission per operation and one every two minutes. If a submission does not produce verified identity, or Sainsbury's asks for an SMS code, automatic sign-in is blocked until you run `auth login`. A changed password therefore cannot be retried into an account lockout.
+- A submission interrupted before its outcome is known, for example because the Mac slept or the operation hit its deadline, gets exactly one more attempt, no sooner than two minutes later. A second unconfirmed result blocks. At most two submissions are made before a verified sign-in or your `auth login`.
+- `auth diagnose` reports `autoSignInBlockReason` (`account_mismatch`, `submission_failed`, `unverified_submission` or `mfa_required`). The timeline records interruptions, the retry, the block, a missing or locked Keychain item and when a human login became necessary.
+- When unattended recovery needs you, the resident service shows one macOS notification asking you to run `auth login`. It repeats only after a later verified sign-in lapses again. The notification has fixed text, no account data. `SAINSBURYS_NOTIFY=off` disables it.
 - SMS codes are never automated. If one is requested, normal commands return an authentication error and you run `auth login`.
 - Basket writes are never resent after a sign-in.
 
