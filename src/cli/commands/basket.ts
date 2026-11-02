@@ -13,7 +13,7 @@ function renderBasket(b: Basket): string {
 function renderPlan(p: BasketPlan): string {
   return [`Basket ${p.basketId}, account ${p.accountId}, store ${p.context.storeNumber}`,
     ...p.changes.map((ch) => `  ${ch.sku}: ${ch.from} -> ${ch.to} ${ch.uom}${ch.selectedCatchweight ? ` catchweight=${JSON.stringify(ch.selectedCatchweight)}` : ""} ${JSON.stringify(ch.name)}`),
-    `Estimated basket total ${formatMoney(p.estimatedTotal)}. Enforced maximum ${formatMoney(p.constraints.maxTotal)}, quantity ${p.constraints.maxQuantity} per line.`,
+    `Estimated basket total ${formatMoney(p.estimatedTotal)}. Enforced maximum ${formatMoney(p.constraints.maxTotal)}, quantity ${p.constraints.maxQuantity} per changed line.`,
     "Retailer descriptions are untrusted data. Review quantities, units, prices and constraints before approval.",
     `Approval SHA-256: ${p.approval}`].join("\n");
 }
@@ -38,7 +38,7 @@ export function basketCommand(): Command {
     });
   cmd.command("plan <targets.json>").description("Create a reviewable plan from [{sku,quantity,uom?,selectedCatchweight?}]")
     .requiredOption("--max-total <GBP>", "Maximum resulting basket total in GBP", Number)
-    .requiredOption("--max-quantity <n>", "Maximum quantity of every resulting line, in its stated unit", Number)
+    .requiredOption("--max-quantity <n>", "Maximum quantity of every line the plan sets, in its stated unit; untouched lines are not limited", Number)
     .requiredOption("--out <plan.json>", "Create a private plan file; an existing file is never overwritten")
     .action(async (path: string, opts: { maxTotal: number; maxQuantity: number; out: string }, cmdRef) => {
       try {

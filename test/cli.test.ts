@@ -34,6 +34,12 @@ test("JSON basket and search execute actual implementation against mocked retail
   let r=run(["--json","basket","show"],{session:true});assert.equal(r.status,0,r.stdout+r.stderr);const basket=JSON.parse(r.stdout);assert.ok(basket.items??basket.basket?.items);assert.equal(r.stderr,"");
   r=run(["--json","product","search","dummy"],{session:true});assert.equal(r.status,0,r.stdout+r.stderr);assert.equal(JSON.parse(r.stdout).products[0].product_uid,"12345");
 });
+test("product get reports SKUs the catalogue no longer returns and fails when none resolve",()=>{
+  let r=run(["--json","product","get","12345","99999"],{session:true});assert.equal(r.status,0,r.stdout+r.stderr);
+  const v=JSON.parse(r.stdout);assert.deepEqual(v.products.map((p:any)=>p.product_uid),["12345"]);assert.deepEqual(v.not_found,["99999"]);assert.deepEqual(v.unavailable,[]);
+  r=run(["--json","product","get","99999"],{session:true});assert.equal(r.status,1);
+  assert.match(JSON.parse(r.stdout).error.message,/No product found for SKU 99999/);
+});
 test("explicit environment store overrides account context",()=>{
   const r=run(["--json","customer","context"],{session:true,store:"9876"});
   assert.equal(r.status,0,r.stdout+r.stderr);

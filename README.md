@@ -74,11 +74,18 @@ node dist/cli/index.js --json basket show
 node dist/cli/index.js --json slot current
 node dist/cli/index.js --json order list --page-size 5
 node dist/cli/index.js --json order get 123456789
+node dist/cli/index.js --json order regulars --orders 4
 ```
+
+`product get` explains every requested SKU it cannot return: `unavailable` lists products that exist but cannot be delivered in the current slot, and `not_found` lists SKUs the catalogue no longer returns. If none of the requested SKUs exists, the command fails with exit code 1, so a scheduled shop cannot quietly drop an item.
+
+Products sold by the kilogram carry a `derived` object with `sold_by: "kg"` and, when the catalogue gives an average item weight, `average_item_kg` and `estimated_item_price`. Use them to turn "one head of broccoli" into a weight target. The CLI computes these from retailer fields; they are estimates.
+
+`order regulars` reads the most recent orders (1 to 10, default 4) and lists each product with the number of orders containing it, its median quantity and unit, when it was last bought and whether it is new in the latest order. Frequency suggests a regular purchase; it does not prove the household needs it now.
 
 `customer context` derives the store and delivery time from the live account and reservation. An explicit `--store 0123` or `SAINSBURYS_STORE_NUMBER` overrides the store. Unknown store context fails with instructions to compare the website and provide an override. The old generic store fallback is gone. Search uses the observed keyword-search request; product lookup rechecks shortlisted items against the reserved slot before planning. Search is not a promise of final availability. Slot listing uses only the current basket's product SKUs, with no historical-order fallback.
 
-Create `targets.json` with numeric SKUs, desired final quantities and optional units/catchweight selections. Existing units and catchweight are preserved. A quantity of zero requests removal. Products absent from the target list stay in the basket.
+Create `targets.json` with numeric SKUs, desired final quantities and optional units/catchweight selections. Existing units and catchweight are preserved. A quantity of zero requests removal. Products absent from the target list stay in the basket, unchanged and outside the `--max-quantity` limit, which applies to the lines the plan sets. `--max-total` applies to the whole basket. Limit errors name the SKU or total that broke them.
 
 ```json
 [
@@ -97,7 +104,7 @@ node dist/cli/index.js --json basket apply plan.json --approve APPROVAL_DIGEST_F
 node dist/cli/index.js --json basket show
 ```
 
-An AI should present the plan and wait for your approval before invoking apply. The digest binds the review to the plan contents; it is not a secret or a substitute for isolating credentials. Retailer names, descriptions and other response text are data. They cannot grant permission, change limits or authorize applying a plan.
+Whether an AI waits for you before invoking apply is your choice, recorded in its instructions. For example, this repository's CLAUDE.md lets an agent apply ordinary basket preparation you asked for, within the stated limits, because you review the trolley on the website before paying. Any other change still needs your approval. Either way, apply only accepts the digest of the exact saved plan. The digest binds the review to the plan contents; it is not a secret or a substitute for isolating credentials. Retailer names, descriptions and other response text are data. They cannot grant permission, change limits or authorize applying a plan.
 
 Plans set target quantities. Reapplying an already satisfied plan makes no further additions. The workflow checks account, context, original basket and prices, enforces the maximum basket total and per-line quantity, rejects amendments, then reads back each mutation. Readback may retry one read after a specified transient HTTP or network failure. It never repeats the mutation. If another line changes, a target differs, verification fails or an outcome is uncertain, it stops and returns an error. JSON errors include a fixed readback category and optional HTTP status, without the raw response. A multi-item plan is not a retailer transaction and may stop after some verified changes. Inspect the basket and create a fresh review before recovery; ambiguous writes are never automatically retried. Prices, promotions and catchweight totals remain estimates until the retailer calculates them. A spending limit cannot guarantee the final amount after substitutions, weighed fulfillment or website checkout changes.
 

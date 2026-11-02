@@ -1,6 +1,6 @@
 import type { GroceriesClient } from "../client/http.js";
 import { record, identifier, string, finiteNumber, ValidationError } from "./validation.js";
-import type { ProductListResponse } from "./types.js";
+import type { Product, ProductListResponse } from "./types.js";
 
 const BASE = "/groceries-api/gol-services/product/v1/product";
 
@@ -122,4 +122,45 @@ export function parseProducts(value: unknown): ProductListResponse {
     if (controls.total_record_count !== undefined && finiteNumber(controls.total_record_count) < 0) throw new ValidationError("product count");
   }
   return { ...r, products } as ProductListResponse;
+}
+
+/** Values the CLI computes from retailer fields. Kept apart from retailer data under `derived`. */
+export interface LooseProductEstimate { sold_by: "kg"; average_item_kg?: number; estimated_item_price?: number }
+
+/** Loose produce is priced per kg. The catalogue's average item weight turns a target weight into an item count. */
+export function looseEstimate(product: Product): LooseProductEstimate | undefined {
+  if (product.retail_price?.measure !== "kg") return undefined;
+  const weight = product.average_weight as { amount?: unknown; measure?: unknown } | undefined;
+  const amount = typeof weight?.amount === "number" && Number.isFinite(weight.amount) && weight.amount > 0 ? weight.amount : undefined;
+  const kg = amount === undefined ? undefined : weight!.measure === "kg" ? amount : weight!.measure === "g" ? amount / 1000 : undefined;
+  if (kg === undefined) return { sold_by: "kg" };
+  return { sold_by: "kg", average_item_kg: kg, estimated_item_price: Math.round(product.retail_price.price * kg * 100) / 100 };
+}
+
+export function withDerived(products: Product[]): Product[] {
+  return products.map(product => {
+    const loose = looseEstimate(product);
+    return loose ? { ...product, derived: loose } : product;
+  });
+}
+
+export interface ProductLookupResult extends ProductListResponse {
+  /** Requested SKUs that exist but cannot be delivered in the current slot context. */
+  unavailable: { product_uid: string; name: string }[];
+  /** Requested SKUs the catalogue no longer returns at all. */
+  not_found: string[];
+}
+
+/** Explains each requested SKU missing from the available-only lookup with a second, unfiltered lookup. */
+export async function lookupProducts(client: GroceriesClient, args: GetByUidArgs): Promise<ProductLookupResult> {
+  const result = await getProductsByUid(client, args);
+  const returned = new Set(result.products.map(product => product.product_uid));
+  const missing = [...new Set(args.uids)].filter(uid => !returned.has(uid));
+  let unavailable: ProductLookupResult["unavailable"] = [];
+  if (missing.length && (args.available ?? true)) {
+    const any = await getProductsByUid(client, { ...args, uids: missing, available: false });
+    unavailable = any.products.filter(product => missing.includes(product.product_uid)).map(product => ({ product_uid: product.product_uid, name: product.name }));
+  }
+  const explained = new Set(unavailable.map(product => product.product_uid));
+  return { ...result, products: withDerived(result.products), unavailable, not_found: missing.filter(uid => !explained.has(uid)) };
 }

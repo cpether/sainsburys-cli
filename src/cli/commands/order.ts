@@ -1,6 +1,7 @@
 import { Command } from "commander";
 import { getActiveOrderStatus, listOrders, getOrder } from "../../api/order.js";
 import { createClient } from "../../client/factory.js";
+import { summariseRegulars } from "../../basket/regulars.js";
 import { getFormat } from "../context.js";
 import { exitCodeFor, printData, printError } from "../output.js";
 export function orderCommand(): Command {
@@ -22,6 +23,23 @@ export function orderCommand(): Command {
         if (!/^\d+$/.test(orderId)) throw new Error("Provide a numeric order ID");
         const result = await getOrder(await createClient(), orderId);
         printData({format:getFormat(ref)}, result, () => JSON.stringify(result));
+      } catch (err) { printError(err); process.exitCode = exitCodeFor(err); }
+    });
+  cmd.command("regulars").description("Summarise how often each product appears in recent orders")
+    .option("--orders <n>", "Most recent orders to read, 1 to 10", "4")
+    .action(async (opts, ref) => {
+      try {
+        const count = Number(opts.orders);
+        if (!Number.isInteger(count) || count < 1 || count > 10) throw new Error("Provide --orders 1 to 10");
+        const client = await createClient();
+        const list = await listOrders(client, {pageSize: count, pageNumber: 1});
+        const orders = [];
+        for (const order of list.orders.slice(0, count)) orders.push(await getOrder(client, order.order_uid));
+        const result = summariseRegulars(orders);
+        printData({format:getFormat(ref)}, result, () => [
+          `${result.orders.length} orders: ${result.orders.map(order => `${order.order_uid} (${order.slot_start_time.slice(0, 10)})`).join(", ")}`,
+          ...result.products.map(p => `${String(p.orders).padStart(2)}/${result.orders.length} ${p.product_uid.padEnd(8)} typical ${p.typical_quantity} ${p.uom.padEnd(3)} last ${p.last_bought.slice(0, 10)}${p.new_in_latest ? " [new]" : "      "} ${JSON.stringify(p.name)}`),
+        ].join("\n"));
       } catch (err) { printError(err); process.exitCode = exitCodeFor(err); }
     });
   cmd.command("status").action(async (_opts, ref) => {
