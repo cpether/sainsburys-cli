@@ -69,7 +69,7 @@ test('real CLI reuses one resident service across plans, readback and logout wit
     assert.equal((await invoke(home, path, ['basket', 'show'])).items.length, 0);
     assert.deepEqual(await invoke(home, path, ['auth', 'diagnose']),{authenticated:true,page:'retailer',passwordFieldVisible:false,mfaFieldVisible:false,credentialPairsObserved:1,storedCredentialsAvailable:true,
       // An older engine omits later fields; the client reports safe defaults.
-      usernameFieldVisible:null,namedPasswordFieldVisible:null,autoSignIn:'unavailable',lastVerifiedAt:null,lastHeartbeatAt:null,lastHeartbeatOk:null,recentEvents:[]});
+      usernameFieldVisible:null,namedPasswordFieldVisible:null,autoSignIn:'unavailable',autoSignInBlockReason:null,lastVerifiedAt:null,lastHeartbeatAt:null,lastHeartbeatOk:null,recentEvents:[]});
     assert.equal((await invoke(home, path, ['order', 'list', '--page-size', '5'])).orders[0].order_uid, '123');
     assert.deepEqual((await invoke(home, path, ['order', 'get', '123'])).order_items, []);
     assert.equal((await invoke(home, path, ['order', 'get', '123/amend'], 1)).ok, false);

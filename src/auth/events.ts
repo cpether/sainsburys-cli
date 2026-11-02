@@ -8,6 +8,7 @@ import { appendFile, open, readFile, rename, rm, stat } from "node:fs/promises";
 export const AUTH_EVENTS = [
   "verified", "renewed", "rejected", "heartbeat_ok", "heartbeat_failed",
   "sign_in_form", "auto_sign_in_submitted", "auto_sign_in_failed", "mfa_required",
+  "auto_sign_in_interrupted", "auto_sign_in_retry", "auto_sign_in_blocked", "keychain_unavailable", "login_needed",
 ] as const;
 export type AuthEventName = typeof AUTH_EVENTS[number];
 export interface AuthEvent { at: string; event: AuthEventName }

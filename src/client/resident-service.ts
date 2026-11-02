@@ -146,6 +146,7 @@ export async function residentAuthenticationDiagnostic(sessionPath: string): Pro
     namedPasswordFieldVisible:typeof d.namedPasswordFieldVisible === "boolean" ? d.namedPasswordFieldVisible : null,
     credentialPairsObserved:d.credentialPairsObserved,storedCredentialsAvailable:d.storedCredentialsAvailable,
     autoSignIn:["unavailable","available","blocked"].includes(String(d.autoSignIn)) ? d.autoSignIn : "unavailable",
+    autoSignInBlockReason:["account_mismatch","submission_failed","unverified_submission","mfa_required"].includes(String(d.autoSignInBlockReason)) ? d.autoSignInBlockReason : null,
     lastVerifiedAt:time(d.lastVerifiedAt),lastHeartbeatAt:time(d.lastHeartbeatAt),lastHeartbeatOk:typeof d.lastHeartbeatOk === "boolean" ? d.lastHeartbeatOk : null};
 }
 

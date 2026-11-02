@@ -9,5 +9,6 @@ process.env.USERPROFILE=home;
 process.env.SAINSBURYS_SESSION_PATH=join(home,'state','session.json');
 // Automated tests never touch the real macOS Keychain.
 process.env.SAINSBURYS_AUTO_SIGN_IN='off';
+process.env.SAINSBURYS_NOTIFY='off';
 globalThis.fetch=async()=>{throw new Error('Real network access is disabled in automated tests');};
 process.on('exit',()=>rmSync(home,{recursive:true,force:true}));
