@@ -148,9 +148,14 @@ function checkConstraints(constraints: Constraints): void {
     throw new Error("Explicit maxTotal (0–10000 GBP) and maxQuantity (0–99) constraints are required");
   }
 }
-function enforceBasket(b: Basket, constraints: Constraints): void {
-  if (b.total_price > constraints.maxTotal + 0.005) throw new Error("Basket exceeds the approved maximum total");
-  if (b.items.some((i) => i.quantity > constraints.maxQuantity)) throw new Error("Basket exceeds the approved per-line maximum quantity");
+const money = (value: number) => `£${value.toFixed(2)}`;
+/** The quantity limit covers lines this plan sets. Lines absent from the targets are never changed, so they are not limited. */
+function enforceBasket(b: Basket, plan: BasketPlan): void {
+  const { maxTotal, maxQuantity } = plan.constraints;
+  if (b.total_price > maxTotal + 0.005) throw new Error(`Basket total ${money(b.total_price)} exceeds the approved maximum total ${money(maxTotal)}`);
+  const planned = new Set(plan.changes.map(change => change.key));
+  const over = stateForPlan(b, plan).find(line => planned.has(line.key) && line.quantity > maxQuantity);
+  if (over) throw new Error(`Basket line ${over.sku ?? over.key} has quantity ${over.quantity}, above the approved per-line maximum ${maxQuantity}`);
 }
 async function guard(c: PlanContext, b: Basket): Promise<void> {
   const status = await getActiveOrderStatus(c.client);
@@ -180,8 +185,9 @@ export function validateTargets(targets: unknown, constraints: Constraints): ass
   if (!Array.isArray(targets) || !targets.length || targets.length > 100) throw new Error("Supply 1–100 target quantities");
   // Reject malformed quantities before any network call.
   for (const t of targets as TargetInput[]) {
-    if (!t || typeof t !== "object" || typeof t.quantity !== "number" || !Number.isFinite(t.quantity) || t.quantity < 0 || t.quantity > constraints.maxQuantity) throw new Error("Invalid target quantity or approved quantity limit exceeded");
-    normalizeIdentifier(t.sku, "target SKU");
+    if (!t || typeof t !== "object" || typeof t.quantity !== "number" || !Number.isFinite(t.quantity) || t.quantity < 0) throw new Error("Each target needs a SKU and a finite, non-negative quantity");
+    const sku = normalizeIdentifier(t.sku, "target SKU");
+    if (t.quantity > constraints.maxQuantity) throw new Error(`Target ${sku} quantity ${t.quantity} is above --max-quantity ${constraints.maxQuantity}`);
     if (t.uom !== undefined) validateQuantity(t.quantity, t.uom);
   }
 }
@@ -216,7 +222,7 @@ export async function createBasketPlan(c: PlanContext, targets: TargetInput[], c
     context: stableContext(c.basketContext), productContext: c.productContext, reservationId: c.reservationId ?? null, baseline, baselineTotal: basket.total_price, changes,
     estimatedTotal: 0, constraints, approval: "" };
   plan.estimatedTotal = estimateTotal(baseline, basket.total_price, changes);
-  if (plan.estimatedTotal > constraints.maxTotal || expectedLines(plan, changes).some((i) => i.quantity > constraints.maxQuantity)) throw new Error("Proposed basket exceeds the approved quantity or spending limit");
+  if (plan.estimatedTotal > constraints.maxTotal) throw new Error(`Estimated basket total ${money(plan.estimatedTotal)} exceeds --max-total ${money(constraints.maxTotal)}`);
   plan.approval = planApproval(plan);
   validatePlan(plan, plan.approval);
   return plan;
@@ -252,7 +258,7 @@ function validatePlan(value: unknown, approval: string): BasketPlan {
     keys.add(ch.key);
   }
   const estimate = estimateTotal(p.baseline, p.baselineTotal, p.changes);
-  if (!Number.isFinite(p.estimatedTotal) || p.estimatedTotal !== estimate || estimate > p.constraints.maxTotal || expectedLines(p, p.changes).some((l) => l.quantity > p.constraints.maxQuantity)) throw new Error("Plan estimate or quantities violate the spending or quantity limit");
+  if (!Number.isFinite(p.estimatedTotal) || p.estimatedTotal !== estimate || estimate > p.constraints.maxTotal) throw new Error("Plan estimate does not match its changes or exceeds the spending limit");
   return p;
 }
 async function applyLocked(c: PlanContext, value: unknown, approval: string): Promise<{ ok: true; alreadyApplied: boolean; verifiedChanges: number; basket: Basket }> {
@@ -264,7 +270,7 @@ async function applyLocked(c: PlanContext, value: unknown, approval: string): Pr
   const current = stateForPlan(basket, plan);
   const final = expectedLines(plan, plan.changes);
   if (quantityState(current) === quantityState(final)) {
-    enforceBasket(basket, plan.constraints);
+    enforceBasket(basket, plan);
     return { ok: true, alreadyApplied: true, verifiedChanges: 0, basket };
   }
   if (canonical(current) !== canonical(plan.baseline) || basket.total_price !== plan.baselineTotal) throw new Error("Basket contents or prices changed; create a new plan");
@@ -313,7 +319,7 @@ async function applyLocked(c: PlanContext, value: unknown, approval: string): Pr
         }
         completed++;
         applied.push(ch);
-        enforceBasket(after, plan.constraints);
+        enforceBasket(after, plan);
         // A failed HTTP write can still be verified by authoritative readback. Never retry it.
       } finally { finishWrite(); }
     } catch (error) {
@@ -321,7 +327,7 @@ async function applyLocked(c: PlanContext, value: unknown, approval: string): Pr
       throw new BasketApplyError(`Basket application stopped${completed ? " after partial completion" : ""}: ${error instanceof Error ? error.message : "verification failed"}`, completed ? "partial" : "mismatch", completed, basket);
     }
   }
-  enforceBasket(basket, plan.constraints);
+  enforceBasket(basket, plan);
   return { ok: true, alreadyApplied: false, verifiedChanges: completed, basket };
 }
 

@@ -79,8 +79,16 @@ describe("approved basket plans use the real HTTP/API implementation", () => {
     assert.equal(p.changes[0]?.from,1); assert.equal(p.changes[0]?.to,3); assert.equal(p.estimatedTotal,6);
     assert.equal(p.approval,planApproval(p)); assert.equal(p.context.storeNumber,"9999");
     assert.equal(f.writes.length,0);
-    await assert.rejects(createBasketPlan(f.context,[{sku:"1234",quantity:3}],{maxTotal:5,maxQuantity:10}),/spending/);
-    await assert.rejects(createBasketPlan(f.context,[{sku:"1234",quantity:11}],constraints),/quantity/);
+    await assert.rejects(createBasketPlan(f.context,[{sku:"1234",quantity:3}],{maxTotal:5,maxQuantity:10}),/Estimated basket total £6\.00 exceeds --max-total £5\.00/);
+    await assert.rejects(createBasketPlan(f.context,[{sku:"1234",quantity:11}],constraints),/Target 1234 quantity 11 is above --max-quantity 10/);
+  });
+  it("limits only the lines a plan sets, leaving larger untouched lines alone", async () => {
+    const f = fixture([{sku:"1234",quantity:4},{sku:"5678",quantity:1}]);
+    const p = await createBasketPlan(f.context,[{sku:"5678",quantity:2}],{maxTotal:100,maxQuantity:2});
+    const result = await applyBasketPlan(f.context,p,p.approval);
+    assert.equal(result.verifiedChanges,1);
+    assert.equal(result.basket.items.find(i=>i.product?.sku==="1234")?.quantity,4);
+    await assert.rejects(createBasketPlan(f.context,[{sku:"1234",quantity:3}],{maxTotal:100,maxQuantity:2}),/Target 1234 quantity 3 is above --max-quantity 2/);
   });
   it("invalid quantities, limits and units make no network requests", async () => {
     const f = fixture();

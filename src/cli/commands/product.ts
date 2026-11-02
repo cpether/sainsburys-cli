@@ -1,8 +1,10 @@
 import { Command } from "commander";
 import {
-  getProductsByUid,
+  looseEstimate,
+  lookupProducts,
   searchProducts,
   searchSuggestions,
+  withDerived,
   type ProductQueryContext,
 } from "../../api/product.js";
 import type { Product } from "../../api/types.js";
@@ -12,9 +14,16 @@ import { exitCodeFor, formatMoney, printData, printError } from "../output.js";
 function renderProductRow(p: Product): string {
   const price = p.retail_price?.price;
   const unit = p.unit_price ? `${formatMoney(p.unit_price.price)}/${p.unit_price.measure}` : "";
+  const loose = looseEstimate(p);
+  const each = loose?.average_item_kg !== undefined ? ` (~${formatMoney(loose.estimated_item_price)} each, ${loose.average_item_kg}kg average)` : "";
   return `${p.product_uid.padEnd(8)} ${formatMoney(price).padStart(7)} ${unit.padEnd(14)} ${
     p.is_available === false ? "[oos] " : "      "
-  }${JSON.stringify(p.name)}`;
+  }${JSON.stringify(p.name)}${each}`;
+}
+
+/** Thrown when none of the requested SKUs exists in the catalogue. */
+export class ProductNotFoundError extends Error {
+  constructor(skus: string[]) { super(`No product found for SKU ${skus.join(", ")}`); this.name = "ProductNotFoundError"; }
 }
 
 function validateSlotOptions(opts: {slotDate?:string;slotType?:string}): void {
@@ -47,12 +56,13 @@ export function productCommand(): Command {
         try {
           if (![30,60,90].includes(opts.pageSize) || !Number.isInteger(opts.page) || opts.page<1 || opts.page>1000) throw new Error("Page size must be 30, 60 or 90; page must be 1 to 1000");
           const c = await buildContext(cmdRef);
-          const result = await searchProducts(c.client, {
+          const found = await searchProducts(c.client, {
             keyword: query.join(" "),
             ctx: c.productContext,
             pageSize: opts.pageSize,
             pageNumber: opts.page,
           });
+          const result = { ...found, products: withDerived(found.products ?? []) };
           printData(c, result, () => {
             const rows = (result.products ?? []).map(renderProductRow).join("\n");
             const total = result.controls?.total_record_count;
@@ -82,14 +92,18 @@ export function productCommand(): Command {
           validateSlotOptions(opts);
           if (skus.some(s => !/^\d+$/.test(s)) || skus.length>100) throw new Error("Provide 1 to 100 numeric SKUs");
           const c = await buildContext(cmdRef);
-          const result = await getProductsByUid(c.client, {
+          const result = await lookupProducts(c.client, {
             uids: skus,
             ctx: productContextFromOptions(c.productContext,opts),
             minimised: opts.minimised,
           });
-          printData(c, result, () =>
-            (result.products ?? []).map(renderProductRow).join("\n"),
-          );
+          // A scheduled shop must not quietly drop an item that no longer exists.
+          if (!result.products.length && !result.unavailable.length) throw new ProductNotFoundError(result.not_found);
+          printData(c, result, () => [
+            ...result.products.map(renderProductRow),
+            ...result.unavailable.map(p => `${p.product_uid.padEnd(8)} unavailable for this slot ${JSON.stringify(p.name)}`),
+            ...result.not_found.map(sku => `${sku.padEnd(8)} not found in the catalogue`),
+          ].join("\n"));
         } catch (err) {
           printError(err);
           process.exitCode = exitCodeFor(err);
